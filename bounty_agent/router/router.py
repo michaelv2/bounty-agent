@@ -75,7 +75,8 @@ class Router:
         if self._local is None:
             from bounty_agent.router.providers import LocalProvider
 
-            self._local = LocalProvider(self.config.local.base_url, self.config.local.timeout_s)
+            self._local = LocalProvider(self.config.local.base_url, self.config.local.timeout_s,
+                                        reasoning_effort=self.config.local.reasoning_effort)
         return self._local
 
     def resolve(self, stage: str, *, overflow: bool = False) -> Route:

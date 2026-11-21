@@ -21,6 +21,12 @@ class Completion:
     text: str
     model: str
     usage: Usage
+    stop_reason: str | None = None  # e.g. "stop"/"end_turn", or "length"/"max_tokens" if truncated
+    reasoning: str = ""             # a reasoning model's thinking, kept apart from the answer
+
+
+class TruncatedOutput(RuntimeError):
+    """The model hit max_tokens before producing any answer (e.g. it spent the budget thinking)."""
 
 
 class Provider(Protocol):
@@ -56,15 +62,20 @@ class AnthropicProvider:
                 cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
                 cache_write_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
             ),
+            stop_reason=getattr(resp, "stop_reason", None),
         )
 
 
 class LocalProvider:
     """Any OpenAI-compatible /v1/chat/completions server (Ollama, vLLM, ...) on llm-server."""
 
-    def __init__(self, base_url: str, timeout_s: float = 600, client: httpx2.Client | None = None):
+    def __init__(self, base_url: str, timeout_s: float = 600, client: httpx2.Client | None = None,
+                 reasoning_effort: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.client = client or httpx2.Client(timeout=timeout_s)
+        # OpenAI-style knob for reasoning models ("none" | "low" | "medium" | "high").
+        # Ollama honors it on /v1; servers that don't know it ignore it.
+        self.reasoning_effort = reasoning_effort
 
     def complete(self, *, model, system, messages, max_tokens, cache):
         body = {
@@ -73,17 +84,30 @@ class LocalProvider:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
         resp = self.client.post(f"{self.base_url}/chat/completions", json=body)
         resp.raise_for_status()
         data = resp.json()
+        choice = data["choices"][0]
+        msg = choice["message"]
         usage = data.get("usage") or {}
+        text = msg.get("content") or ""
+        finish = choice.get("finish_reason")
+        if not text.strip() and finish == "length":
+            raise TruncatedOutput(
+                f"{model} used all {max_tokens} output tokens without answering "
+                f"(reasoning: {len(msg.get('reasoning') or '')} chars). Raise max_tokens or lower reasoning_effort."
+            )
         return Completion(
-            text=data["choices"][0]["message"]["content"],
+            text=text,
             model=model,
             usage=Usage(
                 input_tokens=usage.get("prompt_tokens", 0),
                 output_tokens=usage.get("completion_tokens", 0),
             ),
+            stop_reason=finish,
+            reasoning=msg.get("reasoning") or msg.get("reasoning_content") or "",
         )
 
     def list_models(self) -> list[str]:

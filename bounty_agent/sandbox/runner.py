@@ -357,7 +357,8 @@ def prepare_scratch(snapshot: Path, work: Path, poc_file: Path, dest: str) -> tu
     if not _DEST.match(dest):
         raise SandboxError(f"PoC destination must look like test/Name.t.sol, got {dest!r}")
     _reject_special_files(snapshot)
-    shutil.copytree(snapshot, work, symlinks=True)
+    # copyfile, not copy2: snapshots are read-only, and the scratch copy needs fresh, writable modes.
+    shutil.copytree(snapshot, work, symlinks=True, copy_function=shutil.copyfile)
     removed = _strip_escaping_symlinks(work)
     _no_symlink_components(work, dest)
     (work / dest).parent.mkdir(parents=True, exist_ok=True)

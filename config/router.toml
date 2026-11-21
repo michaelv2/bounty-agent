@@ -14,6 +14,10 @@ per_target_usd = 12.0    # hard cap per target snapshot (all stages combined)
 base_url = "http://llm-server:11434/v1"
 timeout_s = 600
 concurrency = 1          # Ollama on llm-server currently serves one request at a time
+# qwen3.8 is a reasoning model: its thinking counts against max_tokens and arrives in a
+# separate `reasoning` field. "low" keeps it short; "none" turns it off. Part of the
+# llm-server contract: the server must accept (or ignore) this OpenAI-style field.
+reasoning_effort = "low"
 
 [local.aliases]
 # Keep both aliases on one model unless the backtest says otherwise. Ollama

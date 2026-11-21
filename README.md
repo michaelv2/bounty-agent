@@ -18,6 +18,8 @@ docker build -t bounty-sandbox:latest sandbox/foundry   # build the PoC sandbox 
 uv run bounty init           # create data/bounty.db
 uv run bounty budget         # frontier spend vs caps (config/router.toml)
 uv run bounty llm-ping       # check llm-server is reachable and its models are present
+uv run bounty fetch https://github.com/theredguild/damn-vulnerable-defi v4.1.0 --practice  # hardened fetch
+uv run python -m benchmarks.dvd.smoke             # end-to-end smoke test (Docker + llm-server)
 uv run bounty lint-poc path/to/Exploit.t.sol   # flag PoCs that cheat with Foundry cheatcodes
 uv run bounty batches        # Message Batches (50% off) and their state
 uv run bounty batch-collect  # collect finished batches, record costs, release reservations

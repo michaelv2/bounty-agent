@@ -96,6 +96,36 @@ def batch_collect() -> None:
         typer.echo(f"{bid}: {'still processing' if done is None else f'{len(done)} succeeded'}")
 
 
+@app.command()
+def fetch(
+    url: str = typer.Argument(..., help="https://github.com/<owner>/<repo>"),
+    ref: str = typer.Argument(..., help="tag, branch or full commit SHA (resolved and pinned)"),
+    practice: bool = typer.Option(False, "--practice", help="confirm this is a practice target (no bounty program)"),
+) -> None:
+    """Fetch a repo + submodules with hardened git into an immutable snapshot.
+
+    Real bounty targets are fetched by the pipeline after a scope check. This command is
+    for practice targets (e.g. Damn Vulnerable DeFi) and needs --practice.
+    """
+    from bounty_agent.fetch import FetchError, fetch_snapshot
+
+    if not practice:
+        typer.echo("Refusing: real targets go through the pipeline's scope check. Use --practice for CTFs.")
+        raise typer.Exit(2)
+    cfg, conn = _ctx()
+    try:
+        snap = fetch_snapshot(url, ref, cfg.data_dir / "snapshots")
+    except FetchError as exc:
+        typer.echo(f"Fetch failed: {exc}")
+        raise typer.Exit(1)
+    conn.execute(
+        "INSERT INTO targets (kind, locator, pinned_ref, snapshot_hash) VALUES ('repo', ?, ?, ?)",
+        (snap.url, snap.commit, snap.content_hash),
+    )
+    typer.echo(f"{snap.path}\n  commit {snap.commit}\n  content hash {snap.content_hash}\n"
+               f"  {len(snap.submodules)} submodules, {len(snap.skipped)} nested ones skipped")
+
+
 @app.command("lint-poc")
 def lint_poc(paths: list[Path] = typer.Argument(..., exists=True, dir_okay=False)) -> None:
     """Flag Foundry cheatcode patterns that fake an exploit. Exits 1 if any unjustified high flag remains."""

@@ -4,6 +4,7 @@
 The goal is side income from public bug bounty programs, using an agent pipeline that mixes local and frontier models to find, validate and write up vulnerabilities that pay out. This is a personal tool for now. It is also meant to be **handed off to a teenage tinkerer**, so it has to be safe by default, modular and well documented, and built around real problems.
 
 **Changelog**
+- v0.3.2: hardened git fetch (stage B), DVD smoke test passing, local reasoning-model handling (`reasoning_effort`, truncation detection).
 - v0.3.1: sandbox hardened after a security review: no networked builds of target code, verified solc cache, JSON verdicts, effective-config check, symlink-safe scratch copies, rewritten cheat lint. Added the Batch API (§5) and orchestration (§4.2).
 - v0.3: execution sandbox design (§4.1): a dedicated `--network none` container rather than AgentSafe.
 - v0.2.2: the son takes over `llm-server` administration behind an interface contract (§12).
@@ -136,9 +137,10 @@ host (WSL)                                   no Docker socket inside any contain
 - **Tests** (`tests/test_sandbox_*.py`): DNS, HTTPS and LAN egress probes with positive controls; ffi blocked, with a positive control showing it otherwise runs; vacuous, skipped and failing PoCs rejected; target-supplied solc refused; tampered compiler detected; rigged prebuilt artifacts ignored; symlink attacks on host files.
 - **Image** `bounty-sandbox`: Debian slim pinned by digest, plus the pinned Foundry release (checksum-verified, `forge` only). No apt in the final stage. Defined in `sandbox/foundry/Dockerfile`.
 - **Still open:**
-  - **Stage B (fetching target repos and submodules):** run git in a container or with hardening (`protocol.allow` limited to https, no `file://`/`ext::`, `core.fsmonitor` off), and strip `.git` from snapshots.
   - **Telemetry:** check whether forge phones home in installer mode.
   - **Cheat lint:** move to an allowlist built on a real Solidity AST.
+- **Stage B fetch (built 2026-11-21, `bounty_agent/fetch/git.py`):** host git with the user's global and system config ignored. Only https to github.com is allowed (`file://`, `ext::`, ssh and git:// are blocked by git itself, as tested). No hooks, fsmonitor or LFS filters. Commits are pinned by SHA and fetched shallowly. Submodules are parsed and validated by our code and fetched at their gitlinked commits: depth 2, then skipped and recorded; hard cap of 80. `.git` is stripped, the snapshot is content-hashed and made read-only. The only inherited git settings are proxy plumbing (an authenticating proxy's `http.proxy*` and its URL-scoped credential helper).
+- **Smoke test (`benchmarks/dvd/smoke.py`):** DVD v4.1.0 fetch (28 submodules, 82 MB, ~13 s), solc 0.8.25 verified, local triage on `llm-server`, the known Unstoppable solution passes on DVD's own success check, and an empty solution fails. **Passed 2026-11-21.** Known limit: DVD challenges that read JSON fixtures need read-only `fs_permissions`, which the enforced profile currently clears.
 - **Later:** if the controller moves into AgentSafe (no Docker socket), a small host-side runner takes validation jobs from the queue and runs this same fixed command.
 
 ### 4.2 Orchestration (who runs the daily process)
@@ -215,7 +217,7 @@ docs/         # architecture, how-tos, learning path (§12)
     - PoC-cheat lint
     - CLI
 
-    Still to do: the Batch API path, the Docker egress sandbox, Foundry and the Damn Vulnerable DeFi smoke test, and the digest.
+    Done since: Batch API, execution sandbox (security-reviewed), hardened git fetch, and the DVD smoke test (passed). Still to do: the `bounty run` controller and the weekly digest.
   - Verify current AI/automation policies, **age requirements** and KYC/tax rules on Immunefi, Code4rena, Sherlock and Cantina.
   - **Create accounts (human task):** Code4rena and Sherlock first, since they're needed for live contests in Phase 2. Immunefi and Cantina next. Backtesting doesn't need accounts, because past contest repos and findings are public.
   - Confirm the `llm-server` Ollama endpoint is reachable from the dev machine, and benchmark tokens/sec for `qwen3.8:27b`.

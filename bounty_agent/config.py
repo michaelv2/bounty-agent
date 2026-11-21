@@ -24,6 +24,7 @@ class LocalConfig:
     base_url: str
     timeout_s: float = 600
     concurrency: int = 1
+    reasoning_effort: str | None = "low"  # for reasoning models; "none" turns thinking off
     aliases: dict[str, str] = field(default_factory=dict)
 
 
