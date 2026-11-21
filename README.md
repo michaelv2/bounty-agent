@@ -12,13 +12,12 @@ It mixes a free local AI model (on `llm-server`) for bulk reading with paid clou
 
 Most of the work is **throwing things away cheaply**. Every stage is a filter, and the expensive tools only see what the cheap ones let through.
 
-```mermaid
-flowchart LR
-    A["📂 Every source file<br/>in the target"] -->|"local AI reads<br/>each file (free)"| B["🔥 Hotspots<br/>'this looks risky'"]
-    B -->|"cheap cloud AI writes<br/>a proof test"| C["🧪 Proof-of-concept<br/>tests (PoCs)"]
-    C -->|"sandbox runs them;<br/>most fail"| D["✅ Passing PoCs<br/>= findings"]
-    D -->|"Opus tries to<br/>refute each one"| E["🧐 Findings that<br/>survive the skeptic"]
-    E -->|"you read, you decide"| F["📨 Report<br/>(submitted by a human)"]
+```
+ [ every source file in the target ............ ]   Qwen reads each file (free)
+      [ hotspots: "this looks risky" ...... ]       DeepSeek writes a proof test for each
+           [ proof-of-concept tests .... ]          the sandbox runs them; most fail
+                [ passing tests ..... ]             Opus tries to refute each one
+                     [ for you ... ]                you read, decide, and submit
 ```
 
 A passing test is **not** proof of a real bug. On its very first run the pipeline "found" free flash loans in a practice challenge. The test passed, but the zero fee was intended behavior. The skeptic stage rejected it at 95% confidence for $0.03. That story is why the skeptic exists (see [A finding's journey](#a-findings-journey)).
@@ -39,38 +38,39 @@ A passing test is **not** proof of a real bug. On its very first run the pipelin
 
 ## How it works
 
-Each box is a stage. Colors show **who does the work**, which is also roughly how much it costs.
+Each line is a stage. The right-hand column shows **who does the work**, which is also roughly what it costs.
 
-```mermaid
-flowchart TD
-    subgraph legend [" "]
-        direction LR
-        L1["plain code<br/>(free, deterministic)"]:::code
-        L2["local AI<br/>(free, slow)"]:::local
-        L3["cheap cloud AI"]:::cheap
-        L4["Claude Opus"]:::opus
-        L5["human"]:::human
-    end
-
-    T["config/targets.toml<br/>what to look at"]:::code --> B
-    B["B · Fetch<br/>hardened git clone, pinned to one commit"]:::code --> B2
-    B2["Install the exact Solidity compiler"]:::code --> C
-    C["C · Triage<br/>Qwen reads each file and lists suspicious spots"]:::local --> R
-    R["Rank hotspots<br/>by confidence"]:::code --> D
-    D["D · Deep analysis<br/>DeepSeek writes a hypothesis + Foundry PoC"]:::cheap --> E
-    E["E · Validate<br/>cheat lint, then run the PoC in the sandbox"]:::code -->|"fails: error goes back<br/>to D (up to 3 tries)"| D
-    E -->|passes| F2
-    F2["F2 · Skeptic<br/>Opus tries to refute the finding"]:::opus -->|reject| X["kept in the database,<br/>never shown as a lead"]:::code
-    F2 -->|"submit / flag-for-human"| G
-    G["G · Weekly digest<br/>+ Slack summary"]:::code --> H
-    H["You read it.<br/>You decide. You submit."]:::human
-
-    classDef code fill:#e8eaf6,stroke:#3949ab,color:#000
-    classDef local fill:#e8f5e9,stroke:#2e7d32,color:#000
-    classDef cheap fill:#fff8e1,stroke:#f9a825,color:#000
-    classDef opus fill:#fce4ec,stroke:#c2185b,color:#000
-    classDef human fill:#ede7f6,stroke:#5e35b1,color:#000
-    style legend fill:none,stroke:none
+```
+     config/targets.toml           what to look at
+            |
+            v
+ B   Fetch                         hardened git clone, pinned commit       code
+            |
+            v
+     Compiler                      install the exact solc version          code
+            |
+            v
+ C   Triage                        Qwen lists suspicious spots per file    local AI (free)
+            |
+            v
+     Rank                          sort hotspots by confidence             code
+            |
+            v
+ D   Deep analysis  <-----+        DeepSeek writes hypothesis + PoC        cheap API
+            |             |
+            v             |  fails: the error goes back to D (3 tries max)
+ E   Validate  -----------+        cheat lint, then run in the sandbox     code
+            |
+            | passes
+            v
+ F2  Skeptic  ------------------>  reject: kept for auditing, never        Opus
+            |                      shown to you as a lead
+            | submit / flag-for-human
+            v
+ G   Digest                        weekly markdown + one Slack line        code
+            |
+            v
+     You                           read, decide, submit                    human
 ```
 
 Not built yet: **A** (pulling program rules from platforms automatically), **F** (checking whether a finding is already known) and the full report-drafting part of **G**. Until A exists, only `practice` and `backtest` targets run; real programs are refused.
@@ -79,47 +79,25 @@ Not built yet: **A** (pulling program rules from platforms automatically), **F**
 
 Not an AI. `bounty run` is a plain Python **state machine** (`bounty_agent/pipeline/controller.py`). Models are workers inside stages, and none of them decides what happens next. Each target moves through these states and remembers where it is, so a crash or a reboot just means the next run picks up where the last one stopped:
 
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> new
-    new --> fetched: clone + snapshot
-    fetched --> compiler_ready: install solc
-    compiler_ready --> triage_queued: one job per file
-    triage_queued --> triaged: queue drained
-    triaged --> ranked
-    ranked --> awaiting_analysis
-    awaiting_analysis --> analyzed: stage D on top hotspots
-    analyzed --> [*]
-    new --> blocked: 3 failures
-    fetched --> blocked
-    triage_queued --> blocked
-    blocked --> new: bounty target-reset
+```
+ new --> fetched --> compiler_ready --> triage_queued --> triaged --> ranked
+                                                                        |
+                      analyzed <-- stage D -- awaiting_analysis <-------+
+
+ A step that fails 3 times --> blocked     (`bounty target-reset NAME` to retry)
 ```
 
 ### Every night
 
-```mermaid
-sequenceDiagram
-    participant Cron as cron (01:30)
-    participant Run as bounty run
-    participant Qwen as llm-server (Qwen)
-    participant API as Cloud APIs
-    participant Box as Sandbox (no network)
-    participant You as Slack / digest
+```
+ 01:30  cron runs scripts/bounty-nightly.sh, which runs `bounty run`:
 
-    Cron->>Run: scripts/bounty-nightly.sh
-    Run->>API: collect last night's skeptic batch
-    Run->>Run: fetch new targets, install compilers
-    loop one file at a time
-        Run->>Qwen: "what looks risky in this file?"
-    end
-    Run->>API: write PoCs for top hotspots (if enabled)
-    API-->>Run: test code
-    Run->>Box: forge test
-    Box-->>Run: pass / fail
-    Run->>API: send findings to the skeptic as a batch (half price)
-    Run->>You: weekly digest + one-line Slack summary
+   1. collect last night's skeptic batch                  Opus results arrive
+   2. fetch new targets, install compilers                code
+   3. triage, one file at a time                          Qwen on llm-server
+   4. stage D on the top hotspots           (if enabled)  DeepSeek + sandbox
+   5. send new findings to the skeptic      (if enabled)  Opus batch, half price
+   6. write the weekly digest, post one line to Slack     code
 ```
 
 Stages D and F2 cost money, so they're **off** until `[analysis] enabled` and `[review] enabled` are set to `true` in `config/router.toml`. You can always run them by hand on one target (`bounty analyze`, `bounty review`), and add `--dry-run` to see the price first.
@@ -142,11 +120,11 @@ This really happened on 2026-11-21, on the practice challenge *Damn Vulnerable D
 
 The real bug in that challenge is different: anyone can send tokens straight to the vault, which breaks its internal accounting so that every later flash loan reverts. That makes it a **denial of service**. Getting the pipeline to find bugs like that is the work ahead.
 
-```mermaid
-flowchart LR
-    H["hotspot:<br/>flashFee"] --> D["DeepSeek: 'free loans!'<br/>severity high"] --> V["sandbox: ✅ test passes"] --> S["Opus: ❌ reject<br/>'intended behavior'"]
-    style V fill:#e8f5e9,stroke:#2e7d32,color:#000
-    style S fill:#fce4ec,stroke:#c2185b,color:#000
+```
+ hotspot     -->  DeepSeek          -->  sandbox        -->  Opus
+ flashFee         "free loans!"          test PASSES         REJECT (0.95)
+                  severity: high         (only reads         "intended behavior"
+                                          the fee)
 ```
 
 ---
@@ -155,22 +133,27 @@ flowchart LR
 
 The code we analyze may be written by people who'd love to trick an AI. So there are several walls, and no single one has to be perfect:
 
-```mermaid
-flowchart LR
-    subgraph host ["Your machine"]
-        P["Pipeline<br/>(has API keys)"]
-        subgraph box ["Docker sandbox"]
-            direction TB
-            S["forge test<br/>on target code + PoC"]
-            N1["no network"]
-            N2["read-only files,<br/>no root, no extra privileges"]
-            N3["CPU, memory,<br/>process + time limits"]
-        end
-    end
-    M["AI models<br/>(text in, text out:<br/>no tools, no keys)"]
-    P -- "code as tagged,<br/>untrusted data" --> M
-    M -- "a PoC as text" --> L["cheat lint"] --> S
-    S -- "JSON test results" --> P
+```
+                    target code, tagged as untrusted data
+ +--------------+  --------------------------------------->   +----------------------+
+ | pipeline     |                                             | AI model (cloud)     |
+ | (holds keys) |  <---------------------------------------   | text in, text out:   |
+ +--------------+               a PoC, as plain text          | no tools, no keys    |
+        |                                                     +----------------------+
+        v
+   cheat lint          rejects PoCs that fake the exploit
+        |
+        v
+ +----------------------------------------------+
+ | Docker sandbox                               |
+ |   forge test on the target code + the PoC    |
+ |   - no network                               |
+ |   - read-only files, no root                 |
+ |   - CPU, memory, process and time limits     |
+ +----------------------------------------------+
+        |
+        v
+   JSON test results   the pipeline decides pass / fail from these, not exit codes
 ```
 
 - **Hardened fetch** (`bounty_agent/fetch/`): ignores your git config, HTTPS to github.com only, pinned commits, submodules parsed by our own code, and `.git` removed afterwards.
@@ -206,7 +189,7 @@ You need [uv](https://docs.astral.sh/uv/), Docker, and network access to `llm-se
 
 ```bash
 uv sync                                    # install the locked dependencies into .venv
-uv run pytest                              # ~250 tests; the Docker ones skip without the image
+uv run pytest                              # ~250 tests (Docker ones skip without the image)
 docker build -t bounty-sandbox:latest sandbox/foundry   # build the PoC sandbox
 uv run bounty init                         # create data/bounty.db
 uv run bounty llm-ping                     # is llm-server up, and does it have the models?

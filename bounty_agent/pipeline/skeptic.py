@@ -16,7 +16,6 @@ Runs as a Message Batch (50% off; the next nightly run collects it) or synchrono
 
 from __future__ import annotations
 
-import html
 import json
 import re
 import sqlite3
@@ -91,8 +90,7 @@ def parse_review(text: str) -> Review:
         elif last == "concerns":
             fields["concerns"] = (fields["concerns"] + "\n" + line.strip()).strip()
     verdict = fields.get("verdict", "").lower().strip(" .*`")
-    # Models sometimes HTML-escape text inside the <review> tag ("a &lt; b").
-    concerns = html.unescape(fields.get("concerns", ""))[:4000]
+    concerns = fields.get("concerns", "")[:4000]
     if verdict not in VERDICTS:
         return Review("flag-for-human", None, "none", f"unrecognized verdict {verdict[:40]!r}\n{concerns}".strip())
     try:

@@ -81,9 +81,9 @@ def test_unusable_reply_is_flag_for_human_never_submit(text, why):
     assert r.verdict == "flag-for-human" and why in r.concerns
 
 
-def test_concerns_are_html_unescaped():
-    """Seen live 2026-11-21: Opus wrote `block.timestamp &lt; end &amp;&amp; ...` inside <review>."""
-    assert parse_review(reply(concerns="a &lt; b &amp;&amp; c")).concerns == "a < b && c"
+def test_concerns_are_kept_verbatim():
+    """Model text is stored as written; no HTML decoding (a literal `&amp;` in code must survive)."""
+    assert parse_review(reply(concerns="a < b && c &amp; d")).concerns == "a < b && c &amp; d"
 
 
 def test_confidence_is_clamped_or_none():
