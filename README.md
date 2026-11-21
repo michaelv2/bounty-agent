@@ -25,6 +25,8 @@ uv run bounty batches        # Message Batches (50% off) and their state
 uv run bounty batch-collect  # collect finished batches, record costs, release reservations
 uv run bounty run            # one pipeline pass over config/targets.toml (resumable)
 uv run bounty targets        # targets and their stages
+uv run bounty analyze NAME --dry-run   # stage D cost preview (no model calls)
+uv run bounty analyze NAME   # stage D: write + sandbox-validate PoCs (spends API budget)
 uv run bounty digest         # write data/digests/YYYY-Www.md (+ one-line summary)
 scripts/bounty-nightly.sh    # run + digest, for cron / a systemd timer
 uv run bounty kill           # emergency stop for all Claude API calls (`unkill` to resume)

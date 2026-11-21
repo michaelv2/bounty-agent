@@ -20,6 +20,13 @@ def _ctx():
     return cfg, db.connect(cfg.db_path)
 
 
+def _usd(x: float) -> str:
+    """Money for display. Sub-cent amounts (common with DeepSeek) keep enough digits to read."""
+    if 0 < x < 0.01:
+        return f"${x:.4f}"
+    return f"${x:.2f}"
+
+
 @app.command()
 def init() -> None:
     """Create the data directory and database."""
@@ -33,8 +40,8 @@ def budget() -> None:
     cfg, conn = _ctx()
     led = Ledger(conn)
     b = cfg.budget
-    typer.echo(f"Month: ${led.spent_month():.2f} spent + ${led.reserved_month():.2f} reserved / ${b.monthly_usd:.2f}")
-    typer.echo(f"Today: ${led.spent_day():.2f} spent + ${led.reserved_day():.2f} reserved / ${b.daily_usd:.2f}")
+    typer.echo(f"Month: {_usd(led.spent_month())} spent + {_usd(led.reserved_month())} reserved / ${b.monthly_usd:.2f}")
+    typer.echo(f"Today: {_usd(led.spent_day())} spent + {_usd(led.reserved_day())} reserved / ${b.daily_usd:.2f}")
     typer.echo(f"Kill switch: {'ENGAGED' if cfg.kill_switch_path.exists() else 'off'}")
 
 
@@ -152,6 +159,63 @@ def run(
     for line in s.errors:
         typer.echo(f"  ERROR {line}")
     raise typer.Exit(1 if s.errors else 0)
+
+
+@app.command()
+def analyze(
+    name: str = typer.Argument(..., help="target name from config/targets.toml (must be past triage/ranking)"),
+    top_n: int = typer.Option(None, help="hotspots to analyze (default: [analysis] top_n)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="estimate the cost without calling any model"),
+) -> None:
+    """Stage D: generate and validate PoCs for a target's top hotspots. Spends API budget unless --dry-run."""
+    from bounty_agent.ledger import BudgetExceeded, BudgetGuard, KillSwitchEngaged
+    from bounty_agent.pipeline import Analyzer
+    from bounty_agent.pipeline.analysis import ANALYSIS_SYSTEM, build_context
+    from bounty_agent.router import Router
+    from bounty_agent.router.router import estimate_cost
+
+    cfg, conn = _ctx()
+    t = conn.execute("SELECT * FROM targets WHERE name = ?", (name,)).fetchone()
+    if t is None or not t["snapshot_path"]:
+        typer.echo(f"No analyzable target {name!r} (run `bounty run` to fetch and triage it first).")
+        raise typer.Exit(1)
+    n = top_n or int(cfg.analysis.get("top_n", 5))
+    hotspots = conn.execute("SELECT * FROM hotspots WHERE target_id = ? ORDER BY rank LIMIT ?", (t["id"], n)).fetchall()
+    if not hotspots:
+        typer.echo(f"{name} has no ranked hotspots yet.")
+        raise typer.Exit(1)
+
+    led = Ledger(conn)
+    router = Router(cfg, led, BudgetGuard(led, cfg.budget, cfg.kill_switch_path))
+    route = router.resolve("deep_analysis")
+    max_tokens = int(cfg.analysis.get("max_tokens", 12000))
+
+    if dry_run:
+        from pathlib import Path as _P
+
+        others = [r["path"] for r in conn.execute("SELECT path FROM triage WHERE target_id = ?", (t["id"],))]
+        total = 0.0
+        for h in hotspots:
+            ctx = build_context(_P(t["snapshot_path"]), h["path"], others)
+            per_call = estimate_cost(route.model, ANALYSIS_SYSTEM, [{"role": "user", "content": ctx}],
+                                     max_tokens, cache=False)
+            iters = int(cfg.analysis.get("max_iterations", 3))
+            total += per_call * iters  # worst case: every hotspot uses all iterations
+            typer.echo(f"  #{h['rank']} {h['path']}: up to ${per_call * iters:.3f} ({iters} iters, worst case)")
+        typer.echo(f"Model: {route.provider}:{route.model}. Worst-case total: ${total:.2f} "
+                   f"(month so far {_usd(led.spent_month())}/${cfg.budget.monthly_usd:.0f}).")
+        return
+
+    analyzer = Analyzer(cfg, conn, router)
+    for h in hotspots:
+        try:
+            res = analyzer.analyze(t, h)
+        except (BudgetExceeded, KillSwitchEngaged) as exc:
+            typer.echo(f"Stopped: {exc}")
+            break
+        mark = "FINDING" if res.passed else "no PoC"
+        typer.echo(f"  #{h['rank']} {h['path']}: {mark} after {res.iterations} iter(s) — {res.reason}")
+    typer.echo(f"Spend this month: {_usd(led.spent_month())} / ${cfg.budget.monthly_usd:.0f}")
 
 
 @app.command()

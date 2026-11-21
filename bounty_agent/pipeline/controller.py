@@ -38,7 +38,7 @@ from bounty_agent.sandbox import SolcCache, install_solc, required_solc_versions
 
 MAX_FAILURES = 3
 STALE_JOB_MINUTES = 60
-TERMINAL = ("awaiting_analysis", "blocked")
+TERMINAL = ("awaiting_analysis", "analyzed", "blocked")  # stages advance_all won't touch
 
 Fetcher = Callable[[str, str, Path], Snapshot]
 Compiler = Callable[[Path, SolcCache], set[str]]
@@ -56,11 +56,14 @@ class RunSummary:
     jobs_run: int = 0
     batches_collected: int = 0
     out_of_time: bool = False
+    hotspots_analyzed: int = 0
+    findings: int = 0
     failed_ids: set[int] = field(default_factory=set)   # a target fails at most once per run
 
     def as_dict(self) -> dict:
         return {"advanced": self.advanced, "errors": self.errors, "jobs_run": self.jobs_run,
-                "batches_collected": self.batches_collected, "out_of_time": self.out_of_time}
+                "batches_collected": self.batches_collected, "out_of_time": self.out_of_time,
+                "hotspots_analyzed": self.hotspots_analyzed, "findings": self.findings}
 
 
 @contextmanager
@@ -208,6 +211,54 @@ class Pipeline:
                 return
             summary.jobs_run += 1
 
+    def _hotspot_analyzed(self, hotspot_id: int) -> bool:
+        # A hotspot is done once it has a resolved hypothesis (poc_written or dropped).
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM hypotheses WHERE hotspot_id = ? AND status != 'open'",
+            (hotspot_id,)).fetchone()[0] > 0
+
+    def analyze_all(self, deadline: float, summary: RunSummary) -> None:
+        """Stage D: run the analyzer on each awaiting_analysis target's top hotspots.
+
+        Gated by [analysis] enabled, because this is the first stage that spends API money.
+        Budget- and deadline-aware: a cap hit stops all analysis (budget is global), the
+        clock stops a target mid-way (the next run resumes), any other error fails the target.
+        """
+        if not self.cfg.analysis.get("enabled", False):
+            return
+        from bounty_agent.ledger import BudgetExceeded, KillSwitchEngaged
+        from bounty_agent.pipeline.analysis import Analyzer
+
+        analyzer = Analyzer(self.cfg, self.conn, self.router)
+        top_n = int(self.cfg.analysis.get("top_n", 5))
+        ids = [r["id"] for r in self.conn.execute(
+            "SELECT id FROM targets WHERE name IS NOT NULL AND stage = 'awaiting_analysis' ORDER BY id")]
+        for tid in ids:
+            t = self._target(tid)
+            hotspots = self.conn.execute(
+                "SELECT * FROM hotspots WHERE target_id = ? ORDER BY rank LIMIT ?", (tid, top_n)).fetchall()
+            finished = True
+            for h in hotspots:
+                if self.clock() >= deadline:
+                    summary.out_of_time = True
+                    return  # stop here; the target stays awaiting_analysis and resumes next run
+                if self._hotspot_analyzed(h["id"]):
+                    continue
+                try:
+                    res = analyzer.analyze(t, h)
+                except (BudgetExceeded, KillSwitchEngaged) as exc:
+                    summary.errors.append(f"analysis stopped (budget/kill): {exc}")
+                    return  # the cap is global; don't try other targets
+                except Exception as exc:  # noqa: BLE001
+                    self._fail(t, exc, summary)
+                    finished = False
+                    break
+                summary.hotspots_analyzed += 1
+                if res.passed:
+                    summary.findings += 1
+            if finished:
+                self._set_stage(t, "analyzed", summary)
+
     def collect_batches(self, summary: RunSummary) -> None:
         if self.batch_runner is None:
             return
@@ -231,6 +282,7 @@ class Pipeline:
                 self.advance_all(summary)
                 self.drain(deadline, summary)
                 self.advance_all(summary)
+                self.analyze_all(deadline, summary)
                 status = "ok"
                 return summary
             finally:

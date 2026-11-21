@@ -94,3 +94,27 @@ def test_non_ascii_padding_is_not_underestimated():
 
     assert estimate_tokens("a" * 3000) == pytest.approx(1001, abs=1)
     assert estimate_tokens("😀" * 1000) >= 4000  # 4 UTF-8 bytes each, each byte can be a token
+
+
+# ---- provider-prefixed routes (hosted OpenAI-compatible APIs) ----
+
+def test_provider_prefixed_route_uses_remote_and_is_recorded(cfg, ledger, guard):
+    from bounty_agent.config import RemoteProviderConfig
+
+    cfg.providers["mistral"] = RemoteProviderConfig(base_url="https://api.test/v1", key_env="K")
+    cfg.routes["deep_analysis"] = "mistral:deepseek-v4-1-flash-1017"
+    remote = FakeProvider(usage=Usage(1000, 200))
+    router = Router(cfg, ledger, guard, claude=FakeProvider(), local=FakeProvider(),
+                    remote={"mistral": remote})
+    out = router.complete(stage="deep_analysis", system="s", messages=msgs(), max_tokens=100, target_id=1)
+    assert out.model == "deepseek-v4-1-flash-1017"
+    assert remote.calls and ledger.spent_target(1) > 0  # billed like any paid route
+    # deepseek pricing: 1000 in * $0.30/M + 200 out * $1.20/M
+    assert ledger.spent_target(1) == pytest.approx(0.00054)
+
+
+def test_unknown_provider_prefix_is_an_error(cfg, ledger, guard):
+    cfg.routes["deep_analysis"] = "nope:some-model"
+    router = Router(cfg, ledger, guard, claude=FakeProvider(), local=FakeProvider())
+    with pytest.raises(KeyError, match="not defined in \\[providers\\]"):
+        router.complete(stage="deep_analysis", system="s", messages=msgs())

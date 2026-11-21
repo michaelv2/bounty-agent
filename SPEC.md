@@ -4,6 +4,8 @@
 The goal is side income from public bug bounty programs, using an agent pipeline that mixes local and frontier models to find, validate and write up vulnerabilities that pay out. This is a personal tool for now. It is also meant to be **handed off to a teenage tinkerer**, so it has to be safe by default, modular and well documented, and built around real problems.
 
 **Changelog**
+- **First live stage-D run (2026-11-21, DVD Unstoppable, DeepSeek via Mistral, $0.0042):** produced a **false positive**. The model wrote a PoC asserting `flashFee == 0` during the grace period — true, but *intended* behavior, not the challenge's bug (a donation that breaks the share/asset invariant). The PoC passed the sandbox because it asserts a real fact; it shows no attacker gain or broken invariant. Lessons: (1) "a Foundry test passes" is NOT "a vulnerability with impact" — the judge only checks the named test ran and succeeded; (2) the cheat lint correctly stayed silent (no cheatcodes — a weak claim, not cheating); (3) this is concrete justification for the F2 skeptic (Opus) and the human gate, and for the backtest's ground-truth comparison. **Build F2 before trusting any finding.** Possible stage-D hardening: push the prompt/judge toward asserting a before/after impact delta, and for practice/backtest targets check the challenge's own success condition (DVD `_isSolved`) rather than the model's self-asserted impact.
+- v0.5: stage D (deep analysis) with a pluggable provider: any OpenAI-compatible API via `[providers]` and `provider:model` routes, budgeted like Claude. Default first pass is DeepSeek V4.1-Flash-1017 hosted on Mistral's API (~15x cheaper than Opus). Gated by `[analysis] enabled` (off until opted in); `bounty analyze <name> [--dry-run]` for manual runs.
 - v0.4: `bounty run` controller (§4.2), local triage stage C, hotspot ranking, weekly digest, nightly script.
 - v0.3.3: bug hunt (code review, 10 findings fixed, each with a regression test that fails on the old code): batch reservations now survive day/month rollover and are written before the paid API call; snapshots never keep links to host files; cheat-lint alias bypass closed; config-review defaults no longer cached on failure; crashed jobs stop retrying; stale .gitmodules entries skipped; timed-out containers verifiably removed; non-ASCII token estimates; relative submodule URLs bounded.
 - v0.3.2: hardened git fetch (stage B), DVD smoke test passing, local reasoning-model handling (`reasoning_effort`, truncation detection).
@@ -83,7 +85,7 @@ The pipeline never covers: social engineering, DoS, out-of-scope assets, or auto
   - Run Slither, Aderyn, Semgrep and CodeQL.
   - The local model writes per-file summaries, a value-flow and trust-boundary map, and a hotspot ranking.
   - Output: the top-K hotspots.
-- **D. Deep Analysis (Opus 5.5):**
+- **D. Deep Analysis (built 2026-11-21; first pass DeepSeek V4.1-Flash-1017 via Mistral; Opus escalation planned, not built yet):**
   - The codebase and triage map are sent as a **cached prefix**.
   - Opus generates exploit hypotheses per hotspot and writes Foundry or other PoCs.
   - It iterates on PoC failures within a per-target turn and $ cap.

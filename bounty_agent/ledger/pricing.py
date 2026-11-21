@@ -1,6 +1,7 @@
 """Claude API prices in USD per million tokens.
 
-Source: https://platform.claude.com/docs/en/about-claude/pricing (checked 2026-11-21).
+Sources: https://platform.claude.com/docs/en/about-claude/pricing (checked 2026-11-21);
+Mistral-hosted models: docs.mistral.ai/models/pricing via llm-council/VERIFIED.md.
 Update this table when prices change. An unknown model raises an error instead of
 silently costing $0, so a new model can never slip past the budget caps.
 """
@@ -26,6 +27,10 @@ class Price:
 PRICES: dict[str, Price] = {
     "claude-opus-5-5": Price(input=4.00, output=20.00, cache_write=5.00, cache_read=0.20),
     "claude-sonnet-5-5": Price(input=2.00, output=10.00, cache_write=2.50, cache_read=0.10),
+    # Hosted on Mistral's API (prices from llm-council/VERIFIED.md, Mistral pricing page, 2026-11).
+    # No separate cache-write charge on Mistral; cached input is billed at the cache_read rate.
+    "deepseek-v4-1-flash-1017": Price(input=0.30, output=1.20, cache_write=0.30, cache_read=0.007),
+    "mistral-large-4": Price(input=0.70, output=2.10, cache_write=0.70, cache_read=0.07),
     # Haiku 5.5: prompts over 100k tokens cost 5x ($0.50 / $2.50 instead of $0.10 / $0.50).
     "claude-haiku-5-5": Price(
         input=0.10, output=0.50, cache_write=0.125, cache_read=0.01,

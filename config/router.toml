@@ -25,6 +25,22 @@ reasoning_effort = "low"
 local-triage = "qwen3.8:27b-128k"
 local-summarize = "qwen3.8:27b-128k"
 
+# Hosted OpenAI-compatible APIs, used by routes written "<name>:<model>". Keys come from the
+# environment (cron loads ~/.bashrc_env); they are never stored here or logged.
+[providers.mistral]
+base_url = "https://api.mistral.ai/v1"
+key_env = "MISTRAL_API_KEY"
+timeout_s = 300            # llm-council found large prompts can exceed 120 s
+
+# Stage D (deep analysis) knobs.
+[analysis]
+enabled = false           # stage D spends API money; `bounty run` skips it until this is true.
+                          # Use `bounty analyze <name>` for a controlled manual run first.
+top_n = 5                  # hotspots analyzed per target
+max_iterations = 3         # PoC write -> sandbox -> feedback rounds per hotspot
+max_tokens = 12000         # per model reply (reasoning models think first)
+escalate = false           # NOT BUILT YET: retry high-confidence misses on deep_analysis_escalation (Opus)
+
 # Execution sandbox for untrusted target code (SPEC.md §4.1).
 [sandbox]
 image = "bounty-sandbox:latest"
@@ -39,7 +55,8 @@ policy_parse = "local:local-triage"
 triage = "local:local-triage"
 summarize = "local:local-summarize"
 dedup = "local:local-triage"
-deep_analysis = "claude-opus-5-5"
+deep_analysis = "mistral:deepseek-v4-1-flash-1017"   # cheap first pass (~15x cheaper than Opus)
+deep_analysis_escalation = "claude-opus-5-5"         # only for high-confidence misses, if [analysis] escalate
 skeptic_review = "claude-opus-5-5"
 report_draft = "claude-sonnet-5-5"
 overflow = "claude-haiku-5-5"   # used for local-lane stages when the queue is backed up

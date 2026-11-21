@@ -25,7 +25,8 @@ CHARS_PER_TOKEN_ESTIMATE = 3  # conservative: real ratio is usually ~3.5-4 chars
 class Route:
     stage: str
     local: bool
-    model: str  # Claude model ID, or the concrete local model name behind an alias
+    model: str          # Claude model ID, hosted model ID, or the local model behind an alias
+    provider: str = ""  # "local" | "anthropic" | a [providers.<name>] entry
 
 
 def estimate_tokens(text: str) -> int:
@@ -59,12 +60,14 @@ class Router:
         *,
         claude: Provider | None = None,
         local: Provider | None = None,
+        remote: dict[str, Provider] | None = None,
     ):
         self.config = config
         self.ledger = ledger
         self.guard = guard
         self._claude = claude
         self._local = local
+        self._remote: dict[str, Provider] = dict(remote or {})
 
     # Providers are created lazily, so a local-only run never needs an API key.
     @property
@@ -84,7 +87,18 @@ class Router:
                                         reasoning_effort=self.config.local.reasoning_effort)
         return self._local
 
+    def remote(self, name: str) -> Provider:
+        if name not in self._remote:
+            from bounty_agent.router.providers import OpenAICompatProvider
+
+            pc = self.config.providers[name]
+            self._remote[name] = OpenAICompatProvider(pc.base_url, pc.timeout_s, api_key_env=pc.key_env,
+                                                      reasoning_effort=pc.reasoning_effort)
+        return self._remote[name]
+
     def resolve(self, stage: str, *, overflow: bool = False) -> Route:
+        """Route strings: "local:<alias>" (llm-server, free), "<provider>:<model>" (a hosted
+        OpenAI-compatible API from [providers], paid), or a bare Claude model ID (paid)."""
         try:
             target = self.config.routes[stage]
         except KeyError:
@@ -95,10 +109,22 @@ class Router:
                 return self.resolve("overflow")
             alias = target.removeprefix(LOCAL_PREFIX)
             try:
-                return Route(stage, local=True, model=self.config.local.aliases[alias])
+                return Route(stage, local=True, model=self.config.local.aliases[alias], provider="local")
             except KeyError:
                 raise KeyError(f"Local alias {alias!r} is not defined in [local.aliases]") from None
-        return Route(stage, local=False, model=target)
+        if ":" in target:
+            name, model = target.split(":", 1)
+            if name not in self.config.providers:
+                raise KeyError(f"Provider {name!r} (route for {stage!r}) is not defined in [providers]")
+            return Route(stage, local=False, model=model, provider=name)
+        return Route(stage, local=False, model=target, provider="anthropic")
+
+    def _provider(self, route: Route) -> Provider:
+        if route.provider == "local":
+            return self.local
+        if route.provider == "anthropic":
+            return self.claude
+        return self.remote(route.provider)
 
     def complete(
         self,
@@ -120,10 +146,11 @@ class Router:
             self.ledger.record(stage=stage, model=route.model, usage=result.usage, target_id=target_id, local=True)
             return result
 
+        # Every paid route (Claude or hosted) is estimated, checked and recorded the same way.
         estimate = estimate_cost(route.model, system, messages, max_tokens, cache=cache)
         self.guard.check(estimate, target_id=target_id)  # raises before any API call
 
-        result = self.claude.complete(
+        result = self._provider(route).complete(
             model=route.model, system=system, messages=messages, max_tokens=max_tokens, cache=cache
         )
         self.ledger.record(stage=stage, model=route.model, usage=result.usage, target_id=target_id)

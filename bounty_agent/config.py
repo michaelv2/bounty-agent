@@ -29,6 +29,15 @@ class LocalConfig:
 
 
 @dataclass(frozen=True)
+class RemoteProviderConfig:
+    """A hosted OpenAI-compatible API. The key is read from `key_env` at call time."""
+    base_url: str
+    key_env: str
+    timeout_s: float = 300
+    reasoning_effort: str | None = None
+
+
+@dataclass(frozen=True)
 class SandboxConfig:
     image: str = "bounty-sandbox:latest"
     cpus: float = 2.0
@@ -44,6 +53,8 @@ class Config:
     routes: dict[str, str]
     data_dir: Path
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    providers: dict[str, RemoteProviderConfig] = field(default_factory=dict)
+    analysis: dict = field(default_factory=dict)  # stage D knobs, see [analysis] in router.toml
 
     @property
     def db_path(self) -> Path:
@@ -67,5 +78,7 @@ def load_config(path: Path | None = None, data_dir: Path | None = None) -> Confi
         local=LocalConfig(**local_raw, aliases=aliases),
         routes=dict(raw["routes"]),
         sandbox=SandboxConfig(**raw.get("sandbox", {})),
+        providers={name: RemoteProviderConfig(**v) for name, v in raw.get("providers", {}).items()},
+        analysis=dict(raw.get("analysis", {})),
         data_dir=Path(data_dir or os.environ.get("BOUNTY_DATA_DIR", DEFAULT_DATA_DIR)),
     )

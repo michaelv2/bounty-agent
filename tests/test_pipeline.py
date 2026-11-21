@@ -240,3 +240,52 @@ def test_digest_flattens_untrusted_model_text(cfg, conn, ledger, guard, manifest
     make_pipeline(cfg, conn, ledger, guard, manifest, fakes, FakeLocal(hostile)).run(max_minutes=10)
     md, _ = build_digest(cfg, conn)
     assert "\n## Fake section" not in md and "\\| injected" in md
+
+
+# ---- stage D wired into the controller ----
+
+def test_analysis_is_skipped_unless_enabled(cfg, conn, ledger, guard, manifest, fakes):
+    make_pipeline(cfg, conn, ledger, guard, manifest, fakes).run(max_minutes=10)
+    assert target(conn)["stage"] == "awaiting_analysis"  # enabled defaults off
+
+
+def test_enabled_analysis_runs_and_marks_analyzed(cfg, conn, ledger, guard, manifest, fakes, monkeypatch):
+    # Reach awaiting_analysis with analysis OFF, then enable it with the Analyzer patched.
+    make_pipeline(cfg, conn, ledger, guard, manifest, fakes).run(max_minutes=10)
+    assert target(conn)["stage"] == "awaiting_analysis"
+    calls = []
+
+    class FakeAnalyzer:
+        def __init__(self, *a, **k):
+            pass
+
+        def analyze(self, t, h):
+            calls.append(h["id"])
+            from bounty_agent.pipeline.analysis import AnalysisResult
+            conn.execute("INSERT INTO hypotheses (hotspot_id, summary, status) VALUES (?, 'x', 'poc_written')", (h["id"],))
+            return AnalysisResult(True, 1, "passed", finding_id=None, hypothesis_id=None)
+
+    monkeypatch.setattr("bounty_agent.pipeline.analysis.Analyzer", FakeAnalyzer)
+    cfg.analysis.update({"enabled": True, "top_n": 2, "max_iterations": 1})
+    s = make_pipeline(cfg, conn, ledger, guard, manifest, fakes).run(max_minutes=10)
+    assert target(conn)["stage"] == "analyzed" and s.findings == 2 and len(calls) == 2  # two ranked hotspots
+
+
+def test_budget_exceeded_stops_analysis_without_blocking_target(cfg, conn, ledger, guard, manifest, fakes, monkeypatch):
+    make_pipeline(cfg, conn, ledger, guard, manifest, fakes).run(max_minutes=10)
+    tid = target(conn)["id"]
+
+    class BrokeAnalyzer:
+        def __init__(self, *a, **k):
+            pass
+
+        def analyze(self, t, h):
+            from bounty_agent.ledger import BudgetExceeded
+            raise BudgetExceeded("monthly cap")
+
+    monkeypatch.setattr("bounty_agent.pipeline.analysis.Analyzer", BrokeAnalyzer)
+    cfg.analysis.update({"enabled": True, "top_n": 2, "max_iterations": 1})
+    s = make_pipeline(cfg, conn, ledger, guard, manifest, fakes).run(max_minutes=10)
+    t = target(conn)
+    assert t["stage"] == "awaiting_analysis" and t["failures"] == 0  # not blocked; resumes when budget frees
+    assert any("budget/kill" in e for e in s.errors)
