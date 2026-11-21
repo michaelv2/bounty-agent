@@ -23,6 +23,10 @@ uv run python -m benchmarks.dvd.smoke             # end-to-end smoke test (Docke
 uv run bounty lint-poc path/to/Exploit.t.sol   # flag PoCs that cheat with Foundry cheatcodes
 uv run bounty batches        # Message Batches (50% off) and their state
 uv run bounty batch-collect  # collect finished batches, record costs, release reservations
+uv run bounty run            # one pipeline pass over config/targets.toml (resumable)
+uv run bounty targets        # targets and their stages
+uv run bounty digest         # write data/digests/YYYY-Www.md (+ one-line summary)
+scripts/bounty-nightly.sh    # run + digest, for cron / a systemd timer
 uv run bounty kill           # emergency stop for all Claude API calls (`unkill` to resume)
 ```
 Claude calls need `ANTHROPIC_API_KEY` in the environment. Local-only commands don't.

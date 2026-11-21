@@ -32,9 +32,10 @@ CREATE TABLE IF NOT EXISTS targets (
     program_id  INTEGER REFERENCES programs(id),
     kind        TEXT NOT NULL,             -- repo | contract | contest-archive
     locator     TEXT NOT NULL,             -- repo URL, chain:address, ...
-    pinned_ref  TEXT NOT NULL,             -- commit SHA or block number
+    pinned_ref  TEXT NOT NULL,             -- commit SHA or block number (the requested ref until fetched)
     snapshot_hash TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    -- pipeline columns (name, source, stage, ...) are added by _migrate(), so old DBs get them too
 );
 
 CREATE TABLE IF NOT EXISTS hotspots (
@@ -43,6 +44,25 @@ CREATE TABLE IF NOT EXISTS hotspots (
     path        TEXT NOT NULL,
     rank        INTEGER,
     rationale   TEXT
+);
+
+-- Raw local-LLM triage output per file (stage C). Untrusted model output: data, never instructions.
+CREATE TABLE IF NOT EXISTS triage (
+    id          INTEGER PRIMARY KEY,
+    target_id   INTEGER NOT NULL REFERENCES targets(id),
+    path        TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    items_json  TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (target_id, path)
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id          INTEGER PRIMARY KEY,
+    started_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    status      TEXT NOT NULL DEFAULT 'running',  -- running | ok | error
+    summary_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hypotheses (
@@ -159,8 +179,27 @@ def connect(path: Path | str) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for name, decl in columns.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Small in-place upgrades for databases created by older versions."""
+    _ensure_columns(conn, "targets", {
+        "name": "TEXT",                    # from config/targets.toml; NULL for ad-hoc `bounty fetch`
+        "source": "TEXT",                  # practice | backtest | program
+        "include_json": "TEXT",            # globs of files to triage
+        "snapshot_path": "TEXT",
+        "stage": "TEXT NOT NULL DEFAULT 'new'",
+        "stage_error": "TEXT",
+        "failures": "INTEGER NOT NULL DEFAULT 0",
+        "updated_at": "TEXT",
+    })
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_name ON targets(name) WHERE name IS NOT NULL")
+    _ensure_columns(conn, "hotspots", {"function": "TEXT", "confidence": "TEXT"})
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(batches)")}
     if "api_id" not in cols:
         conn.execute("ALTER TABLE batches ADD COLUMN api_id TEXT")

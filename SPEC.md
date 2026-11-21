@@ -4,6 +4,7 @@
 The goal is side income from public bug bounty programs, using an agent pipeline that mixes local and frontier models to find, validate and write up vulnerabilities that pay out. This is a personal tool for now. It is also meant to be **handed off to a teenage tinkerer**, so it has to be safe by default, modular and well documented, and built around real problems.
 
 **Changelog**
+- v0.4: `bounty run` controller (§4.2), local triage stage C, hotspot ranking, weekly digest, nightly script.
 - v0.3.3: bug hunt (code review, 10 findings fixed, each with a regression test that fails on the old code): batch reservations now survive day/month rollover and are written before the paid API call; snapshots never keep links to host files; cheat-lint alias bypass closed; config-review defaults no longer cached on failure; crashed jobs stop retrying; stale .gitmodules entries skipped; timed-out containers verifiably removed; non-ASCII token estimates; relative submodule URLs bounded.
 - v0.3.2: hardened git fetch (stage B), DVD smoke test passing, local reasoning-model handling (`reasoning_effort`, truncation detection).
 - v0.3.1: sandbox hardened after a security review: no networked builds of target code, verified solc cache, JSON verdicts, effective-config check, symlink-safe scratch copies, rewritten cheat lint. Added the Batch API (§5) and orchestration (§4.2).
@@ -149,6 +150,7 @@ host (WSL)                                   no Docker socket inside any contain
 - **Why not an LLM supervisor:** budget caps, scope checks and sandbox arguments must not be open to negotiation. Prompt injection in target code must not be able to reroute the pipeline. A deterministic controller is also testable, reproducible, and spends no tokens on "managing".
 - **LLMs are workers inside stages,** chosen per stage by the router: local Qwen for bulk work, Opus for deep analysis (D) and the skeptic filter (F2) in front of the human.
 - **Claude Code is the dev and review environment,** not part of the automated loop. The weekly human review can be a Claude Code session ("walk me through this week's digest"). The pipeline calls the Anthropic API directly so every token goes through the ledger.
+- **Built 2026-11-21 (`bounty_agent/pipeline/`):** `bounty run` with a run lock and a `runs` history. Each run requeues stale jobs, collects finished batches, syncs `config/targets.toml`, advances targets through `new → fetched → compiler_ready → triage_queued → triaged → ranked → awaiting_analysis`, and drains the local queue within a time budget. A failing step records the error. After 3 failures the target is `blocked` until `bounty target-reset`. `program` targets are refused until a confirmed policy exists. `bounty digest` writes the weekly markdown and a one-line summary. `scripts/bounty-nightly.sh` wraps both for cron. First real run: DVD Unstoppable went `new → awaiting_analysis` in 3.4 min. The real bug ranked #4 of 5 in local triage; deep analysis has to recover it from the top-K.
 - **Ops reviewer: Mistral Large 4 (decided 2026-11-21).** Once a week it reads the ledger, backtest metrics, queue and batch state, and recent outcomes. It writes a short progress note with *proposed* config changes (routes, caps, EV weights), which a human approves. It is advisory only: no write access to config, no control-path role. It goes through the router and ledger like every other model (provider + price-table entry + caps). Its input is pipeline metrics, never raw target code. Not yet built. It needs Mistral's current API and pricing checked first.
 
 ## 5. Model Routing & Cost Model
@@ -218,7 +220,7 @@ docs/         # architecture, how-tos, learning path (§12)
     - PoC-cheat lint
     - CLI
 
-    Done since: Batch API, execution sandbox (security-reviewed), hardened git fetch, and the DVD smoke test (passed). Still to do: the `bounty run` controller and the weekly digest.
+    Done since: Batch API, execution sandbox (security-reviewed), hardened git fetch, and the DVD smoke test (passed). `bounty run` controller and weekly digest done too. Next: stage D (deep analysis with Opus), F2 (skeptic batch), then the backtest harness.
   - Verify current AI/automation policies, **age requirements** and KYC/tax rules on Immunefi, Code4rena, Sherlock and Cantina.
   - **Create accounts (human task):** Code4rena and Sherlock first, since they're needed for live contests in Phase 2. Immunefi and Cantina next. Backtesting doesn't need accounts, because past contest repos and findings are public.
   - Confirm the `llm-server` Ollama endpoint is reachable from the dev machine, and benchmark tokens/sec for `qwen3.8:27b`.

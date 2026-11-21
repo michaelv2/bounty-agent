@@ -126,6 +126,71 @@ def fetch(
                f"  {len(snap.submodules)} submodules, {len(snap.skipped)} nested ones skipped")
 
 
+@app.command()
+def run(
+    max_minutes: float = typer.Option(60, help="time budget for draining the local queue"),
+    manifest: Path = typer.Option(Path("config/targets.toml"), help="target manifest"),
+) -> None:
+    """Run the pipeline once (meant for a nightly timer). Safe to re-run; resumes where it left off."""
+    from bounty_agent.ledger import BudgetGuard
+    from bounty_agent.pipeline import AlreadyRunning, Pipeline
+    from bounty_agent.router import BatchRunner, Router
+
+    cfg, conn = _ctx()
+    led = Ledger(conn)
+    router = Router(cfg, led, BudgetGuard(led, cfg.budget, cfg.kill_switch_path))
+    pipeline = Pipeline(cfg, conn, router, manifest=manifest, batch_runner=BatchRunner(router))
+    try:
+        s = pipeline.run(max_minutes)
+    except AlreadyRunning as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(3)
+    typer.echo(f"run #{s.run_id}: {s.jobs_run} local jobs, {s.batches_collected} batches collected"
+               + (" (out of time; the next run continues)" if s.out_of_time else ""))
+    for line in s.advanced:
+        typer.echo(f"  {line}")
+    for line in s.errors:
+        typer.echo(f"  ERROR {line}")
+    raise typer.Exit(1 if s.errors else 0)
+
+
+@app.command()
+def digest(short: bool = typer.Option(False, "--short", help="print only the one-line summary (for Slack)")) -> None:
+    """Write this week's digest to data/digests/YYYY-Www.md and print the summary."""
+    from bounty_agent.pipeline import write_digest
+
+    cfg, conn = _ctx()
+    path, summary = write_digest(cfg, conn)
+    typer.echo(summary if short else f"{summary}\n{path}")
+
+
+@app.command()
+def targets() -> None:
+    """List pipeline targets and their stages."""
+    _, conn = _ctx()
+    rows = conn.execute("SELECT * FROM targets WHERE name IS NOT NULL ORDER BY id").fetchall()
+    if not rows:
+        typer.echo("No targets. Add entries to config/targets.toml and run `bounty run`.")
+    for t in rows:
+        err = f"  ({t['stage_error']})" if t["stage_error"] else ""
+        typer.echo(f"{t['name']:<24} {t['source']:<9} {t['stage']:<18} failures={t['failures']}{err}")
+
+
+@app.command("target-reset")
+def target_reset(name: str) -> None:
+    """Clear a target's failures and unblock it (it resumes from the last completed stage)."""
+    _, conn = _ctx()
+    t = conn.execute("SELECT * FROM targets WHERE name = ?", (name,)).fetchone()
+    if t is None:
+        typer.echo(f"No target {name!r}.")
+        raise typer.Exit(1)
+    stage = t["stage"]
+    if stage == "blocked":  # resume from the furthest stage whose output exists
+        stage = "fetched" if t["snapshot_path"] else "new"
+    conn.execute("UPDATE targets SET stage = ?, failures = 0, stage_error = NULL WHERE id = ?", (stage, t["id"]))
+    typer.echo(f"{name}: reset to {stage}")
+
+
 @app.command("lint-poc")
 def lint_poc(paths: list[Path] = typer.Argument(..., exists=True, dir_okay=False)) -> None:
     """Flag Foundry cheatcode patterns that fake an exploit. Exits 1 if any unjustified high flag remains."""

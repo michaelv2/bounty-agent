@@ -1,0 +1,14 @@
+# Targets for `bounty run`. See bounty_agent/pipeline/targets.py for the format.
+#
+# source = "practice"  CTFs (intentionally vulnerable code)
+# source = "backtest"  past audit contests with published findings (Phase 1)
+# source = "program"   real bounty programs: refused until a human-confirmed scope policy exists
+#
+# Pin `ref` to a full commit SHA so runs are reproducible.
+
+[[target]]
+name = "dvd-unstoppable"
+source = "practice"
+url = "https://github.com/theredguild/damn-vulnerable-defi"
+ref = "64fddf9f96de2782f8868898d68673acb295119c"   # v4.1.0
+include = ["src/unstoppable/*.sol"]

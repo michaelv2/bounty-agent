@@ -337,3 +337,19 @@ def fetch_snapshot(url: str, ref: str, snapshots_dir: Path, *, git: HardenedGit 
     finally:
         if own:
             git.close()
+
+
+def fetch_or_reuse(url: str, ref: str, snapshots_dir: Path, *, git: HardenedGit | None = None) -> Snapshot:
+    """Like fetch_snapshot, but reuse an existing snapshot of the same commit (no network for a SHA)."""
+    url = validate_url(url)
+    own = git is None
+    git = git or HardenedGit()
+    try:
+        commit = git.resolve_ref(url, ref)
+        existing = snapshots_dir / f"{url.rsplit('/', 1)[-1]}-{commit[:12]}"
+        if existing.is_dir() and not existing.is_symlink():
+            return Snapshot(existing, url, commit, content_hash(existing))
+        return fetch_snapshot(url, commit, snapshots_dir, git=git)
+    finally:
+        if own:
+            git.close()
