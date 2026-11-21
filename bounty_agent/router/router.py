@@ -136,6 +136,7 @@ class Router:
         target_id: int | None = None,
         cache: bool = False,
         overflow: bool = False,
+        effort: str | None = None,
     ) -> Completion:
         route = self.resolve(stage, overflow=overflow)
 
@@ -150,8 +151,10 @@ class Router:
         estimate = estimate_cost(route.model, system, messages, max_tokens, cache=cache)
         self.guard.check(estimate, target_id=target_id)  # raises before any API call
 
+        # `effort` is a Claude-only knob (output_config.effort); other providers never see it.
+        extra = {"effort": effort} if effort and route.provider == "anthropic" else {}
         result = self._provider(route).complete(
-            model=route.model, system=system, messages=messages, max_tokens=max_tokens, cache=cache
+            model=route.model, system=system, messages=messages, max_tokens=max_tokens, cache=cache, **extra
         )
         self.ledger.record(stage=stage, model=route.model, usage=result.usage, target_id=target_id)
         return result

@@ -200,6 +200,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     })
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_name ON targets(name) WHERE name IS NOT NULL")
     _ensure_columns(conn, "hotspots", {"function": "TEXT", "confidence": "TEXT"})
+    _ensure_columns(conn, "findings", {"details_json": "TEXT"})   # the stage-D hypothesis fields
+    _ensure_columns(conn, "reviews", {
+        "severity": "TEXT",    # the reviewer's own severity call
+        "source": "TEXT",      # 'sync', or 'batch:<local batch id>' (makes applying results idempotent)
+    })
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(batches)")}
     if "api_id" not in cols:
         conn.execute("ALTER TABLE batches ADD COLUMN api_id TEXT")

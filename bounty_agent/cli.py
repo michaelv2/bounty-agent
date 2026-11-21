@@ -219,6 +219,55 @@ def analyze(
 
 
 @app.command()
+def review(
+    finding_id: int = typer.Argument(None, help="finding to review now (omit to list findings and verdicts)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="estimate the cost without calling any model"),
+) -> None:
+    """Stage F2: list findings with their skeptic verdicts, or review one now (spends API budget)."""
+    from bounty_agent.ledger import BudgetExceeded, BudgetGuard, KillSwitchEngaged
+    from bounty_agent.pipeline.skeptic import STAGE, Skeptic, latest_reviews
+    from bounty_agent.router import Router
+    from bounty_agent.router.router import estimate_cost
+
+    cfg, conn = _ctx()
+    if finding_id is None:
+        rows = latest_reviews(conn)
+        if not rows:
+            typer.echo("No findings yet.")
+        for r in rows:
+            verdict = r["verdict"] or "not reviewed"
+            conf = f" ({r['confidence']:.2f})" if r["confidence"] is not None else ""
+            typer.echo(f"#{r['id']} [{r['target']}] {r['title']}\n    claimed {r['claimed_severity']}; "
+                       f"skeptic: {verdict}{conf}, severity {r['reviewed_severity'] or '-'}")
+            for line in (r["concerns"] or "").splitlines()[:6]:
+                typer.echo(f"      {line}")
+        return
+
+    led = Ledger(conn)
+    router = Router(cfg, led, BudgetGuard(led, cfg.budget, cfg.kill_switch_path))
+    skeptic = Skeptic(cfg, conn, router)
+    try:
+        system, messages, _ = skeptic.build_request(finding_id)
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1)
+    if dry_run:
+        route = router.resolve(STAGE)
+        est = estimate_cost(route.model, system, messages, skeptic.max_tokens, cache=False)
+        typer.echo(f"Model: {route.model} (effort {skeptic.effort}). Worst case ${est:.3f}; "
+                   f"a batch would be half that.")
+        return
+    try:
+        rv = skeptic.review_now(finding_id)
+    except (BudgetExceeded, KillSwitchEngaged) as exc:
+        typer.echo(f"Stopped: {exc}")
+        raise typer.Exit(1)
+    conf = f" (confidence {rv.confidence:.2f})" if rv.confidence is not None else ""
+    typer.echo(f"#{finding_id}: {rv.verdict}{conf}, severity {rv.severity}\n{rv.concerns}")
+    typer.echo(f"Spend this month: {_usd(led.spent_month())} / ${cfg.budget.monthly_usd:.0f}")
+
+
+@app.command()
 def digest(short: bool = typer.Option(False, "--short", help="print only the one-line summary (for Slack)")) -> None:
     """Write this week's digest to data/digests/YYYY-Www.md and print the summary."""
     from bounty_agent.pipeline import write_digest

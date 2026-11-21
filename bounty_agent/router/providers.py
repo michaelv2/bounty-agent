@@ -46,8 +46,11 @@ class AnthropicProvider:
             client = anthropic.Anthropic()
         self.client = client
 
-    def complete(self, *, model, system, messages, max_tokens, cache):
+    def complete(self, *, model, system, messages, max_tokens, cache, effort=None):
         kwargs = {"model": model, "max_tokens": max_tokens, "system": system, "messages": messages}
+        if effort:
+            # Opus 5.5 always thinks (adaptive); effort is the only depth control. Default: medium.
+            kwargs["output_config"] = {"effort": effort}
         if cache:
             # Automatic prompt caching: caches everything up to the last cacheable block.
             kwargs["cache_control"] = {"type": "ephemeral"}

@@ -41,6 +41,14 @@ max_iterations = 3         # PoC write -> sandbox -> feedback rounds per hotspot
 max_tokens = 12000         # per model reply (reasoning models think first)
 escalate = false           # NOT BUILT YET: retry high-confidence misses on deep_analysis_escalation (Opus)
 
+# Stage F2 (skeptic review) knobs. Opus tries to refute each stage-D finding.
+[review]
+enabled = false           # spends API money; `bounty run` skips it until this is true.
+                          # Use `bounty review <finding id>` for a controlled manual run first.
+mode = "batch"            # batch: 50% off, collected by the next run | sync: answer in this run
+effort = "high"           # Opus 5.5 always thinks; effort sets the depth (its default is medium)
+max_tokens = 16000        # thinking counts against this
+
 # Execution sandbox for untrusted target code (SPEC.md §4.1).
 [sandbox]
 image = "bounty-sandbox:latest"

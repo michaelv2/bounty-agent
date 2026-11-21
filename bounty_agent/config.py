@@ -55,6 +55,7 @@ class Config:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     providers: dict[str, RemoteProviderConfig] = field(default_factory=dict)
     analysis: dict = field(default_factory=dict)  # stage D knobs, see [analysis] in router.toml
+    review: dict = field(default_factory=dict)    # stage F2 knobs, see [review] in router.toml
 
     @property
     def db_path(self) -> Path:
@@ -80,5 +81,6 @@ def load_config(path: Path | None = None, data_dir: Path | None = None) -> Confi
         sandbox=SandboxConfig(**raw.get("sandbox", {})),
         providers={name: RemoteProviderConfig(**v) for name, v in raw.get("providers", {}).items()},
         analysis=dict(raw.get("analysis", {})),
+        review=dict(raw.get("review", {})),
         data_dir=Path(data_dir or os.environ.get("BOUNTY_DATA_DIR", DEFAULT_DATA_DIR)),
     )

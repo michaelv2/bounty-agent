@@ -12,6 +12,7 @@ in tags that the system prompt names as data, not instructions.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from collections.abc import Callable
@@ -109,7 +110,8 @@ def parse_reply(text: str) -> tuple[dict, str | None]:
     return fields, code
 
 
-def build_context(snapshot: Path, hotspot_path: str, other_paths: list[str]) -> str:
+def build_context(snapshot: Path, hotspot_path: str, other_paths: list[str],
+                  budget: int = CONTEXT_CHAR_BUDGET) -> str:
     """Hotspot file first, then other triaged files until the char budget is spent. Paths are
     validated the same way triage validates them, so nothing outside the snapshot is read."""
     parts: list[str] = []
@@ -119,7 +121,7 @@ def build_context(snapshot: Path, hotspot_path: str, other_paths: list[str]) -> 
             src = safe_source_path(snapshot, rel).read_text(encoding="utf-8", errors="replace")
         except TriageError:
             continue
-        if used + len(src) > CONTEXT_CHAR_BUDGET and parts:
+        if used + len(src) > budget and parts:
             continue
         parts.append(f'<file path="{rel}">\n{src}\n</file>')
         used += len(src)
@@ -216,8 +218,8 @@ class Analyzer:
             if result.passed:
                 self.conn.execute("UPDATE hypotheses SET status = 'poc_written' WHERE id = ?", (hyp_id,))
                 fid = self.conn.execute(
-                    "INSERT INTO findings (poc_id, title, severity) VALUES (?, ?, ?)",
-                    (poc_id, fields["title"][:300], fields["severity"])).lastrowid
+                    "INSERT INTO findings (poc_id, title, severity, details_json) VALUES (?, ?, ?, ?)",
+                    (poc_id, fields["title"][:300], fields["severity"], json.dumps(fields))).lastrowid
                 return AnalysisResult(True, i, "PoC passed", finding_id=fid, hypothesis_id=hyp_id)
             reason = result.reason
             messages.append({"role": "user", "content": _feedback(result, [], None)})
@@ -225,9 +227,8 @@ class Analyzer:
         self.conn.execute("UPDATE hypotheses SET status = 'dropped' WHERE id = ?", (hyp_id,))
         return AnalysisResult(False, self.max_iterations, reason, hypothesis_id=hyp_id)
 
-    # PoCs are kept on disk so a human can re-run them later (SPEC.md §4 stage G).
     def _poc_path(self, target_id: int, poc_id: int) -> Path:
-        return self.cfg.data_dir / "pocs" / f"t{target_id}" / f"poc{poc_id}.t.sol"
+        return poc_file(self.cfg, target_id, poc_id)
 
     def _write_poc(self, target_id: int, poc_id: int, code: str) -> None:
         p = self._poc_path(target_id, poc_id)
@@ -235,7 +236,10 @@ class Analyzer:
         p.write_text(code, encoding="utf-8")
 
 
-def _flag_json(flags: list) -> str:
-    import json
+def poc_file(cfg: Config, target_id: int, poc_id: int) -> Path:
+    """Where a PoC lives on disk. Kept so a human (and the skeptic) can re-read or re-run it."""
+    return cfg.data_dir / "pocs" / f"t{target_id}" / f"poc{poc_id}.t.sol"
 
+
+def _flag_json(flags: list) -> str:
     return json.dumps([{"rule": f.rule, "severity": f.severity, "line": f.line} for f in flags])

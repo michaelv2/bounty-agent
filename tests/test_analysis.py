@@ -159,6 +159,8 @@ def test_passing_poc_becomes_a_finding(cfg, conn, snapshot):
     assert res.passed and res.iterations == 1 and res.finding_id
     f = conn.execute("SELECT title, severity FROM findings WHERE id = ?", (res.finding_id,)).fetchone()
     assert f["title"] == "Reentrancy drains the vault" and f["severity"] == "high"
+    details = conn.execute("SELECT details_json FROM findings WHERE id = ?", (res.finding_id,)).fetchone()[0]
+    assert "re-enter withdraw" in details  # the full hypothesis is kept for the skeptic (F2)
     assert conn.execute("SELECT status FROM hypotheses WHERE id = ?", (res.hypothesis_id,)).fetchone()[0] == "poc_written"
 
 

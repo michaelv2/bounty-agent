@@ -10,7 +10,8 @@ Not an LLM. A resumable state machine over the SQLite tables. Each run:
      until the queue is empty or the time budget runs out
   6. finishes targets whose triage is done:
         triage_queued -> triaged -> ranked -> awaiting_analysis
-     ('awaiting_analysis' is the end of the line until stage D is built)
+  7. stage D (if [analysis] enabled): awaiting_analysis -> analyzed, writing findings
+  8. stage F2 (if [review] enabled): unreviewed findings go to the skeptic
 
 Every step is idempotent. A failing step records the error and leaves the target where
 it was; after MAX_FAILURES failures the target is 'blocked' until a human resets it.
@@ -58,6 +59,7 @@ class RunSummary:
     out_of_time: bool = False
     hotspots_analyzed: int = 0
     findings: int = 0
+    reviews: int = 0
     failed_ids: set[int] = field(default_factory=set)   # a target fails at most once per run
 
     def as_dict(self) -> dict:
@@ -260,14 +262,50 @@ class Pipeline:
                 self._set_stage(t, "analyzed", summary)
 
     def collect_batches(self, summary: RunSummary) -> None:
-        if self.batch_runner is None:
+        if self.batch_runner is not None:
+            for bid in self.batch_runner.pending():
+                try:
+                    if self.batch_runner.collect(bid) is not None:
+                        summary.batches_collected += 1
+                except Exception as exc:  # noqa: BLE001
+                    summary.errors.append(f"batch {bid}: {type(exc).__name__}: {exc}")
+        # Results are stored in batch_items, so applying them is separate and re-runnable.
+        from bounty_agent.pipeline.skeptic import Skeptic
+
+        try:
+            summary.reviews += Skeptic(self.cfg, self.conn, self.router).apply_batches()
+        except Exception as exc:  # noqa: BLE001
+            summary.errors.append(f"applying skeptic reviews: {type(exc).__name__}: {exc}")
+
+    def review_all(self, deadline: float, summary: RunSummary) -> None:
+        """Stage F2: send unreviewed findings to the skeptic. Gated by [review] enabled.
+
+        Batch mode (default) submits one batch; the next run collects it. Sync mode reviews
+        each finding now. A budget cap or kill switch stops the stage, never the run."""
+        if not self.cfg.review.get("enabled", False):
             return
-        for bid in self.batch_runner.pending():
-            try:
-                if self.batch_runner.collect(bid) is not None:
-                    summary.batches_collected += 1
-            except Exception as exc:  # noqa: BLE001
-                summary.errors.append(f"batch {bid}: {type(exc).__name__}: {exc}")
+        from bounty_agent.ledger import BudgetExceeded, KillSwitchEngaged
+        from bounty_agent.pipeline.skeptic import Skeptic
+
+        skeptic = Skeptic(self.cfg, self.conn, self.router, self.batch_runner)
+        pending = skeptic.pending()
+        if not pending:
+            return
+        try:
+            if self.cfg.review.get("mode", "batch") == "batch" and self.batch_runner is not None:
+                skeptic.submit_batch(pending)
+                summary.advanced.append(f"skeptic: {len(pending)} finding(s) sent as a batch")
+                return
+            for fid in pending:
+                if self.clock() >= deadline:
+                    summary.out_of_time = True
+                    return
+                skeptic.review_now(fid)
+                summary.reviews += 1
+        except (BudgetExceeded, KillSwitchEngaged) as exc:
+            summary.errors.append(f"skeptic stopped (budget/kill): {exc}")
+        except Exception as exc:  # noqa: BLE001
+            summary.errors.append(f"skeptic: {type(exc).__name__}: {exc}")
 
     def run(self, max_minutes: float) -> RunSummary:
         deadline = self.clock() + max_minutes * 60
@@ -283,6 +321,7 @@ class Pipeline:
                 self.drain(deadline, summary)
                 self.advance_all(summary)
                 self.analyze_all(deadline, summary)
+                self.review_all(deadline, summary)
                 status = "ok"
                 return summary
             finally:

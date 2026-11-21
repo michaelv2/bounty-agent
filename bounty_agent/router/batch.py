@@ -52,6 +52,7 @@ class BatchItem:
     messages: list[Message]
     max_tokens: int = 4096
     target_id: int | None = None
+    params: dict = field(default_factory=dict)  # extra request fields, e.g. {"output_config": {...}}
 
 
 @dataclass(frozen=True)
@@ -124,8 +125,8 @@ class BatchRunner:
 
     def submit(self, stage: str, items: list[BatchItem], *, cache: bool = False) -> str:
         route = self.router.resolve(stage)
-        if route.local:
-            raise BatchError(f"stage {stage!r} routes to the local model; batches are for Claude routes")
+        if route.local or route.provider != "anthropic":
+            raise BatchError(f"stage {stage!r} routes to {route.provider or 'local'}; batches are for Claude routes")
         if not items:
             raise BatchError("empty batch")
         ids = [i.custom_id for i in items]
@@ -151,7 +152,8 @@ class BatchRunner:
 
         requests = []
         for i in items:
-            params = {"model": route.model, "max_tokens": i.max_tokens, "system": i.system, "messages": i.messages}
+            params = {**i.params, "model": route.model, "max_tokens": i.max_tokens,
+                      "system": i.system, "messages": i.messages}
             if cache:
                 params["cache_control"] = {"type": "ephemeral"}
             requests.append({"custom_id": i.custom_id, "params": params})

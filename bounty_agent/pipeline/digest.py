@@ -76,12 +76,26 @@ def build_digest(cfg: Config, conn: sqlite3.Connection, now: datetime | None = N
     if not any_hot:
         lines += ["No hotspots yet.", ""]
 
-    pending_review = conn.execute(
-        """SELECT COUNT(*) FROM findings f JOIN reviews r ON r.finding_id = f.id
-           WHERE r.verdict IN ('submit', 'flag-for-human')""").fetchone()[0]
-    lines += ["## Awaiting your review", "",
-              f"{pending_review} finding(s)." if pending_review else
-              "Nothing yet. Findings appear here once deep analysis (stage D) is built.", ""]
+    from bounty_agent.pipeline.skeptic import latest_reviews
+
+    reviewed = latest_reviews(conn)
+    yours = [r for r in reviewed if r["verdict"] in ("submit", "flag-for-human")]
+    pending_review = len(yours)
+    lines += ["## Awaiting your review", ""]
+    if yours:
+        for r in yours:
+            conf = f", confidence {r['confidence']:.2f}" if r["confidence"] is not None else ""
+            lines.append(f"- **#{r['id']}** {_one_line(r['title'], 120)} ({r['target']}): skeptic says "
+                         f"**{r['verdict']}**, severity {r['reviewed_severity']}{conf}. "
+                         f"{_one_line(r['concerns'] or '', 300)}")
+        lines.append("")
+    else:
+        lines += ["Nothing passed the skeptic yet.", ""]
+    rejected = sum(1 for r in reviewed if r["verdict"] == "reject")
+    unreviewed = sum(1 for r in reviewed if r["verdict"] is None)
+    if rejected or unreviewed:
+        lines += [f"Also: {rejected} rejected by the skeptic (kept for auditing), "
+                  f"{unreviewed} not reviewed yet. `bounty review` lists them.", ""]
 
     counts = conn.execute("SELECT state, COUNT(*) AS n FROM jobs GROUP BY state").fetchall()
     failed = conn.execute(
