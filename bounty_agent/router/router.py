@@ -32,6 +32,19 @@ def estimate_tokens(text: str) -> int:
     return len(text) // CHARS_PER_TOKEN_ESTIMATE + 1
 
 
+def estimate_cost(model: str, system: str, messages: list[Message], max_tokens: int,
+                  *, cache: bool, batch: bool = False) -> float:
+    """Worst case: the whole prompt is a cache write (if caching) and output hits max_tokens."""
+    prompt_tokens = estimate_tokens(system) + sum(estimate_tokens(m["content"]) for m in messages)
+    return cost_usd(
+        model,
+        input_tokens=0 if cache else prompt_tokens,
+        cache_write_tokens=prompt_tokens if cache else 0,
+        output_tokens=max_tokens,
+        batch=batch,
+    )
+
+
 class Router:
     def __init__(
         self,
@@ -101,14 +114,7 @@ class Router:
             self.ledger.record(stage=stage, model=route.model, usage=result.usage, target_id=target_id, local=True)
             return result
 
-        prompt_tokens = estimate_tokens(system) + sum(estimate_tokens(m["content"]) for m in messages)
-        # Worst case: the whole prompt is a cache write (if caching) and output hits max_tokens.
-        estimate = cost_usd(
-            route.model,
-            input_tokens=0 if cache else prompt_tokens,
-            cache_write_tokens=prompt_tokens if cache else 0,
-            output_tokens=max_tokens,
-        )
+        estimate = estimate_cost(route.model, system, messages, max_tokens, cache=cache)
         self.guard.check(estimate, target_id=target_id)  # raises before any API call
 
         result = self.claude.complete(

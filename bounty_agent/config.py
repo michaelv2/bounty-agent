@@ -28,11 +28,21 @@ class LocalConfig:
 
 
 @dataclass(frozen=True)
+class SandboxConfig:
+    image: str = "bounty-sandbox:latest"
+    cpus: float = 2.0
+    memory: str = "4g"
+    pids_limit: int = 512
+    timeout_s: float = 900
+
+
+@dataclass(frozen=True)
 class Config:
     budget: BudgetConfig
     local: LocalConfig
     routes: dict[str, str]
     data_dir: Path
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
     @property
     def db_path(self) -> Path:
@@ -55,5 +65,6 @@ def load_config(path: Path | None = None, data_dir: Path | None = None) -> Confi
         budget=BudgetConfig(**raw["budget"]),
         local=LocalConfig(**local_raw, aliases=aliases),
         routes=dict(raw["routes"]),
+        sandbox=SandboxConfig(**raw.get("sandbox", {})),
         data_dir=Path(data_dir or os.environ.get("BOUNTY_DATA_DIR", DEFAULT_DATA_DIR)),
     )

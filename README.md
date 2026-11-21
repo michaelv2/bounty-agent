@@ -13,11 +13,14 @@ A personal pipeline that uses agents to find, validate and write up vulnerabilit
 ## Quickstart
 ```bash
 uv sync                      # install locked dependencies into .venv
-uv run pytest                # run the guardrail tests
+uv run pytest                # run the guardrail tests (Docker tests skip unless the image exists)
+docker build -t bounty-sandbox:latest sandbox/foundry   # build the PoC sandbox image
 uv run bounty init           # create data/bounty.db
 uv run bounty budget         # frontier spend vs caps (config/router.toml)
 uv run bounty llm-ping       # check llm-server is reachable and its models are present
 uv run bounty lint-poc path/to/Exploit.t.sol   # flag PoCs that cheat with Foundry cheatcodes
+uv run bounty batches        # Message Batches (50% off) and their state
+uv run bounty batch-collect  # collect finished batches, record costs, release reservations
 uv run bounty kill           # emergency stop for all Claude API calls (`unkill` to resume)
 ```
 Claude calls need `ANTHROPIC_API_KEY` in the environment. Local-only commands don't.

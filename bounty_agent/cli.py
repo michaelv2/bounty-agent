@@ -33,8 +33,8 @@ def budget() -> None:
     cfg, conn = _ctx()
     led = Ledger(conn)
     b = cfg.budget
-    typer.echo(f"Month: ${led.spent_month():.2f} / ${b.monthly_usd:.2f}")
-    typer.echo(f"Today: ${led.spent_day():.2f} / ${b.daily_usd:.2f}")
+    typer.echo(f"Month: ${led.spent_month():.2f} spent + ${led.reserved_month():.2f} reserved / ${b.monthly_usd:.2f}")
+    typer.echo(f"Today: ${led.spent_day():.2f} spent + ${led.reserved_day():.2f} reserved / ${b.daily_usd:.2f}")
     typer.echo(f"Kill switch: {'ENGAGED' if cfg.kill_switch_path.exists() else 'off'}")
 
 
@@ -63,6 +63,37 @@ def queue() -> None:
         typer.echo("Queue is empty.")
     for state, n in sorted(counts.items()):
         typer.echo(f"{state:>8}: {n}")
+
+
+@app.command()
+def batches() -> None:
+    """List Message Batches and their items' states."""
+    _, conn = _ctx()
+    rows = conn.execute(
+        """SELECT b.id, b.stage, b.status, b.created_ts, COUNT(i.custom_id) AS n,
+                  SUM(i.state = 'pending') AS pending, COALESCE(SUM(i.estimate_usd), 0) AS est
+           FROM batches b LEFT JOIN batch_items i ON i.batch_id = b.id
+           GROUP BY b.id ORDER BY b.created_ts DESC LIMIT 20"""
+    ).fetchall()
+    if not rows:
+        typer.echo("No batches.")
+    for r in rows:
+        typer.echo(f"{r['id']}  {r['stage']:<15} {r['status']:<11} items={r['n']} pending={r['pending']} "
+                   f"max=${r['est']:.2f}  created {r['created_ts']}")
+
+
+@app.command("batch-collect")
+def batch_collect() -> None:
+    """Collect results for every finished batch (records costs, releases reservations)."""
+    from bounty_agent.ledger import BudgetGuard
+    from bounty_agent.router import BatchRunner, Router
+
+    cfg, conn = _ctx()
+    led = Ledger(conn)
+    runner = BatchRunner(Router(cfg, led, BudgetGuard(led, cfg.budget, cfg.kill_switch_path)))
+    for bid in runner.pending():
+        done = runner.collect(bid)
+        typer.echo(f"{bid}: {'still processing' if done is None else f'{len(done)} succeeded'}")
 
 
 @app.command("lint-poc")

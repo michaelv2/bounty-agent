@@ -21,6 +21,14 @@ concurrency = 1          # Ollama on llm-server currently serves one request at 
 local-triage = "qwen3.8:27b-128k"
 local-summarize = "qwen3.8:27b-128k"
 
+# Execution sandbox for untrusted target code (SPEC.md §4.1).
+[sandbox]
+image = "bounty-sandbox:latest"
+cpus = 2.0
+memory = "4g"
+pids_limit = 512
+timeout_s = 900
+
 # Stage -> model routes. "local:<alias>" runs on llm-server; anything else is a Claude model ID.
 [routes]
 policy_parse = "local:local-triage"

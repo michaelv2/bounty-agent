@@ -32,3 +32,4 @@ exclude-newer = "2026-11-07T00:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["docker: needs Docker and the bounty-sandbox image (skipped otherwise)"]

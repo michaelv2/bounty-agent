@@ -1,0 +1,9 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = []
+solc_version = "0.8.28"
+# Deliberately hostile: a target's own config is untrusted. The sandbox must
+# keep ffi disabled even when the target turns it on.
+ffi = true

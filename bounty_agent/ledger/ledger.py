@@ -87,6 +87,28 @@ class Ledger:
     def spent_target(self, target_id: int) -> float:
         return self._sum("target_id = ?", (target_id,))
 
+    # Pending batch items: money committed but not yet billed.
+    def _reserved(self, where: str, params: tuple) -> float:
+        row = self.conn.execute(
+            f"""SELECT COALESCE(SUM(i.estimate_usd), 0) FROM batch_items i
+                JOIN batches b ON b.id = i.batch_id
+                WHERE i.state = 'pending' AND {where}""",
+            params,
+        ).fetchone()
+        return float(row[0])
+
+    def reserved_month(self) -> float:
+        return self._reserved("b.created_ts LIKE ?", (self.clock().strftime("%Y-%m-") + "%",))
+
+    def reserved_day(self) -> float:
+        return self._reserved("b.created_ts LIKE ?", (self.clock().strftime("%Y-%m-%d") + "%",))
+
+    def reserved_target(self, target_id: int) -> float:
+        return self._reserved("i.target_id = ?", (target_id,))
+
+    def now_ts(self) -> str:
+        return self.clock().strftime("%Y-%m-%d %H:%M:%S")
+
 
 class BudgetGuard:
     def __init__(self, ledger: Ledger, budget: BudgetConfig, kill_switch_path: Path):
@@ -95,16 +117,18 @@ class BudgetGuard:
         self.kill_switch_path = kill_switch_path
 
     def check(self, estimate_usd: float, target_id: int | None = None) -> None:
-        """Raise unless `estimate_usd` more spend fits under every cap."""
+        """Raise unless `estimate_usd` more spend fits under every cap (spent + reserved by pending batches)."""
         if self.kill_switch_path.exists():
             raise KillSwitchEngaged(f"Kill switch present: {self.kill_switch_path}")
 
+        led = self.ledger
         caps = [
-            ("monthly", self.ledger.spent_month(), self.budget.monthly_usd),
-            ("daily", self.ledger.spent_day(), self.budget.daily_usd),
+            ("monthly", led.spent_month() + led.reserved_month(), self.budget.monthly_usd),
+            ("daily", led.spent_day() + led.reserved_day(), self.budget.daily_usd),
         ]
         if target_id is not None:
-            caps.append(("per-target", self.ledger.spent_target(target_id), self.budget.per_target_usd))
+            caps.append(("per-target", led.spent_target(target_id) + led.reserved_target(target_id),
+                         self.budget.per_target_usd))
 
         for name, spent, cap in caps:
             if spent + estimate_usd > cap:

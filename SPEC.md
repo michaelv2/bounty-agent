@@ -4,6 +4,8 @@
 The goal is side income from public bug bounty programs, using an agent pipeline that mixes local and frontier models to find, validate and write up vulnerabilities that pay out. This is a personal tool for now. It is also meant to be **handed off to a teenage tinkerer**, so it has to be safe by default, modular and well documented, and built around real problems.
 
 **Changelog**
+- v0.3.1: sandbox hardened after a security review: no networked builds of target code, verified solc cache, JSON verdicts, effective-config check, symlink-safe scratch copies, rewritten cheat lint. Added the Batch API (§5) and orchestration (§4.2).
+- v0.3: execution sandbox design (§4.1): a dedicated `--network none` container rather than AgentSafe.
 - v0.2.2: the son takes over `llm-server` administration behind an interface contract (§12).
 - v0.2.1: recorded the `llm-server` host, the digest going to both markdown and Slack, the private repo, and account creation as a Phase 0 task.
 - v0.2: added the operator constraints (§0), Opus as the primary reviewer (stage F2), a budget-driven model routing and cost model, the handoff/learning plan (§12), and revised kill criteria.
@@ -84,7 +86,8 @@ The pipeline never covers: social engineering, DoS, out-of-scope assets, or auto
   - It iterates on PoC failures within a per-target turn and $ cap.
 - **E. Validation (deterministic):**
   - The PoC must pass in the sandbox: a fork test showing loss or invariant break, or an ASan crash.
-  - **PoC-cheat lint:** flag Foundry cheatcodes that fake the exploit, such as `vm.prank` as owner/admin, `vm.deal`/`deal` beyond realistic attacker capital, `vm.store` on protocol state, or mocked oracles not in the threat model. LLM-written PoCs often cheat this way.
+  - **PoC-cheat lint:** flag Foundry cheatcodes that fake the exploit, such as `vm.prank` as owner/admin, `vm.deal`/`deal` beyond realistic attacker capital, `vm.store` on protocol state, or mocked oracles not in the threat model. LLM-written PoCs often cheat this way. `vm.ffi` (shell execution) is flagged and also disabled in the sandbox.
+  - All target code runs in the **execution sandbox** (§4.1).
 - **F. Dedup/Novelty:** check against known-issues lists, prior audits, public disclosures, GitHub issues, CVE/GHSA, and (for backtests) the contest's own findings.
 - **F2. Opus Skeptic Review:** a separate Opus call (Batch API) that tries to *refute* the finding. It checks:
   - scope
@@ -103,6 +106,47 @@ The pipeline never covers: social engineering, DoS, out-of-scope assets, or auto
 
   It is delivered in a weekly digest, both as a markdown file (`digests/YYYY-WW.md`) and as a short Slack summary via `notify-on-complete`.
 - **H. Ledger:** $ per stage, per target and per month. Outcomes. Skeptic accuracy (verdict vs. platform outcome). The data feeds EV scoring and model routing.
+
+### 4.1 Execution Sandbox (decided 2026-11-21)
+Untrusted target code runs at validation time: build scripts, test code, and Foundry's `vm.ffi`, which can run shell commands. So it runs in a dedicated throwaway container, **not** in AgentSafe. AgentSafe allows HTTPS egress and holds credentials by design. It suits an agent's dev environment, not a detonation chamber for hostile code. The sandbox reuses AgentSafe's hardening patterns:
+- non-root user, `cap_drop ALL`, `no-new-privileges`
+- pinned versions, bumped only after an audit
+- binary-only installs, read-only mounts
+
+```
+host (WSL)                                   no Docker socket inside any container
+├── bounty pipeline  → Claude API, llm-server
+│     ├── solc installer: network, but builds a project WE generate. No target files mounted.
+│     │                   Compiler SHA-256 checked against soliditylang's list.json and recorded
+│     │                   in a host-side manifest. Re-hashed before every run.
+│     └── PoC run:        docker run --network none --read-only --cap-drop ALL --init --pull never
+│                           --security-opt no-new-privileges, pids/memory/cpu limits, ulimits
+│                           (fsize, nofile, core), tmpfs /tmp noexec, timeout + output cap,
+│                           scratch copy of the snapshot, solc cache read-only
+│                         1. `forge config --json` → the effective config is checked
+│                         2. `forge test --offline --force --json` → JSON verdict
+└── (Phase 2) anvil fork container: egress to the RPC provider only, joined to the run
+      container via an internal-only Docker network (the run container still has no internet)
+```
+- **Target code never runs with network.** There is no networked build of target code. Compiler versions are read host-side from `foundry.toml` or exact pragmas, and a path-valued `solc` is refused.
+- **The command is fixed in code** (`bounty_agent/sandbox/runner.py`). An LLM supplies file contents (the PoC) and an optional test-name filter, never docker arguments or shell commands.
+- **Pass/fail comes from `forge test --json`.** A PoC passes only if at least one test in *its own file* ran and every test reports `Success`. forge exits 0 when zero tests match, so the exit code alone means nothing. Skipped tests fail validation.
+- **The scratch copy is hostile.** Absolute or escaping symlinks are removed, special files are rejected, and host-side writes use `O_NOFOLLOW` and `O_EXCL`. The PoC must be a *new* file under `test/`, so it can't overwrite the contract under test.
+- **Foundry config is untrusted.** forge ignores `FOUNDRY_FFI=false` when the target's `foundry.toml` sets `ffi = true` (found by test, 2026-11-21). The runner appends a randomly named profile with `ffi = false`, `fs_permissions = []` and fresh `out`/`cache_path`, selects it with `FOUNDRY_PROFILE`, and then checks **forge's own parse** of the config. Attacker-favorable settings such as `sender`, `initial_balance` and `block_*` that differ from forge defaults are passed to reviewers as notes.
+- **Tests** (`tests/test_sandbox_*.py`): DNS, HTTPS and LAN egress probes with positive controls; ffi blocked, with a positive control showing it otherwise runs; vacuous, skipped and failing PoCs rejected; target-supplied solc refused; tampered compiler detected; rigged prebuilt artifacts ignored; symlink attacks on host files.
+- **Image** `bounty-sandbox`: Debian slim pinned by digest, plus the pinned Foundry release (checksum-verified, `forge` only). No apt in the final stage. Defined in `sandbox/foundry/Dockerfile`.
+- **Still open:**
+  - **Stage B (fetching target repos and submodules):** run git in a container or with hardening (`protocol.allow` limited to https, no `file://`/`ext::`, `core.fsmonitor` off), and strip `.git` from snapshots.
+  - **Telemetry:** check whether forge phones home in installer mode.
+  - **Cheat lint:** move to an allowlist built on a real Solidity AST.
+- **Later:** if the controller moves into AgentSafe (no Docker socket), a small host-side runner takes validation jobs from the queue and runs this same fixed command.
+
+### 4.2 Orchestration (who runs the daily process)
+- **The controller is deterministic Python code, not an LLM.** `bounty run` is a resumable state machine over the SQLite tables, started headless by a systemd timer or cron on the WSL host. Each run picks targets by EV, enqueues local jobs, drains the local queue (overnight), submits and collects batches, runs PoCs in the sandbox, and writes the digest.
+- **Why not an LLM supervisor:** budget caps, scope checks and sandbox arguments must not be open to negotiation. Prompt injection in target code must not be able to reroute the pipeline. A deterministic controller is also testable, reproducible, and spends no tokens on "managing".
+- **LLMs are workers inside stages,** chosen per stage by the router: local Qwen for bulk work, Opus for deep analysis (D) and the skeptic filter (F2) in front of the human.
+- **Claude Code is the dev and review environment,** not part of the automated loop. The weekly human review can be a Claude Code session ("walk me through this week's digest"). The pipeline calls the Anthropic API directly so every token goes through the ledger.
+- **Ops reviewer: Mistral Large 4 (decided 2026-11-21).** Once a week it reads the ledger, backtest metrics, queue and batch state, and recent outcomes. It writes a short progress note with *proposed* config changes (routes, caps, EV weights), which a human approves. It is advisory only: no write access to config, no control-path role. It goes through the router and ledger like every other model (provider + price-table entry + caps). Its input is pipeline metrics, never raw target code. Not yet built. It needs Mistral's current API and pricing checked first.
 
 ## 5. Model Routing & Cost Model
 Prices are from Anthropic's pricing docs as of 2026-11-21, per MTok:

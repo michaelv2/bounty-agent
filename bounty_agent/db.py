@@ -105,6 +105,28 @@ CREATE TABLE IF NOT EXISTS costs (
 CREATE INDEX IF NOT EXISTS idx_costs_ts ON costs(ts);
 CREATE INDEX IF NOT EXISTS idx_costs_target ON costs(target_id);
 
+-- Message Batches API (50% off, results within 24h). Pending items reserve their
+-- worst-case cost against the budget caps until their results are collected.
+CREATE TABLE IF NOT EXISTS batches (
+    id          TEXT PRIMARY KEY,          -- Anthropic batch ID
+    stage       TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'in_progress',  -- in_progress | ended
+    created_ts  TEXT NOT NULL,
+    ended_ts    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS batch_items (
+    batch_id     TEXT NOT NULL REFERENCES batches(id),
+    custom_id    TEXT NOT NULL,
+    target_id    INTEGER,
+    estimate_usd REAL NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending',  -- pending | succeeded | errored | canceled | expired
+    result_text  TEXT,
+    error        TEXT,
+    PRIMARY KEY (batch_id, custom_id)
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id          INTEGER PRIMARY KEY,
     kind        TEXT NOT NULL,
