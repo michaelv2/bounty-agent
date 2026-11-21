@@ -4,6 +4,7 @@
 The goal is side income from public bug bounty programs, using an agent pipeline that mixes local and frontier models to find, validate and write up vulnerabilities that pay out. This is a personal tool for now. It is also meant to be **handed off to a teenage tinkerer**, so it has to be safe by default, modular and well documented, and built around real problems.
 
 **Changelog**
+- v0.2.2: the son takes over `llm-server` administration behind an interface contract (§12).
 - v0.2.1: recorded the `llm-server` host, the digest going to both markdown and Slack, the private repo, and account creation as a Phase 0 task.
 - v0.2: added the operator constraints (§0), Opus as the primary reviewer (stage F2), a budget-driven model routing and cost model, the handoff/learning plan (§12), and revised kill criteria.
 - v0.1: initial draft.
@@ -203,7 +204,8 @@ docs/         # architecture, how-tos, learning path (§12)
 
 **Open**
 1. Confirm the Ollama port on `llm-server` (default 11434), and whether it's reachable from WSL.
-2. Should the son get his own GitHub account as a collaborator now, or later?
+2. Should the son get his own GitHub account as a collaborator now? Recommended: yes, with branch protection on `main` so changes arrive as PRs.
+3. Does `llm-server` serve anything besides this project? If so, list those uses in the `infra/` runbook so his optimizations don't break them.
 
 ## 12. Handoff & Learning Plan
 The project is designed so a teenage tinkerer can work on it safely and learn real skills:
@@ -220,6 +222,12 @@ The project is designed so a teenage tinkerer can work on it safely and learn re
   - EV-score tuning from backtest data
   - local-lane throughput (vLLM migration)
 - **Docs:** `CLAUDE.md` with project conventions, `docs/architecture.md`, and a `docs/learning-path.md`.
+- **He owns `llm-server`.** The son administers the local LLM host. Ground rules:
+  - **Interface contract:** the pipeline depends only on an OpenAI-compatible endpoint at a fixed URL plus model *aliases* (`local-triage`, `local-summarize`). He can swap Ollama for vLLM, change quantization or switch models without touching pipeline code, as long as the contract holds and a benchmark doesn't regress.
+  - **Config as code:** the host setup (service files, model list, env vars) lives in `infra/llm-server/` with a README runbook. Changes go through PRs.
+  - **Own credentials:** he uses his own user account and SSH key on the host, with sudo scoped as needed. Nobody shares the parent's keys.
+  - **Network:** Ollama/vLLM have no auth, so they listen on the LAN or Tailscale only and are never port-forwarded to the internet.
+  - **Benchmark before and after:** `benchmarks/llm_server.py` measures tokens/sec, concurrency and triage quality on a fixed fixture set. That gives him an objective scoreboard for his optimizations.
 - **Metrics are the teacher.** The backtest harness gives objective feedback (recall, false positives, $), so changes can be judged by numbers, not vibes.
 
 ## Verification (of the MVP)
