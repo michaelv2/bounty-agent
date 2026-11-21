@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials*
+
+# Local state & data
+*.db
+*.sqlite
+*.sqlite3
+data/
+targets/
+digests/
+logs/
+
+# Foundry
+out/
+cache/
+broadcast/
+
+# Editors / tooling
+.idea/
+.vscode/
+.claude/
+.DS_Store

@@ -1,0 +1,232 @@
+# SPEC v0.2: Agentic Bug Bounty Pipeline ("bounty-agent")
+
+## Context
+The goal is side income from public bug bounty programs, using an agent pipeline that mixes local and frontier models to find, validate and write up vulnerabilities that pay out. This is a personal tool for now. It is also meant to be **handed off to a teenage tinkerer**, so it has to be safe by default, modular and well documented, and built around real problems.
+
+**Changelog**
+- v0.2.1: recorded the `llm-server` host, the digest going to both markdown and Slack, the private repo, and account creation as a Phase 0 task.
+- v0.2: added the operator constraints (§0), Opus as the primary reviewer (stage F2), a budget-driven model routing and cost model, the handoff/learning plan (§12), and revised kill criteria.
+- v0.1: initial draft.
+
+---
+
+## 0. Operator Constraints
+| Constraint | Value | Design consequence |
+|---|---|---|
+| Local compute | Dual RTX 3090 (48 GB VRAM) on host **`llm-server`**. `qwen3.8:27b` on Ollama (assumed `http://llm-server:11434`), serving one request at a time. | The local lane is a **serial job queue** that runs overnight or in idle time. Work there must be batchable and resumable. |
+| Frontier budget | **$50–100/month** | Hard monthly cap in the ledger. Opus only for deep reasoning. Batch API and prompt caching everywhere possible. |
+| Human review time | **~1 hr/week** | Opus is the primary reviewer, and the human only reviews what reaches the final gate. **≤3 review packets/week**, each readable in under 10 minutes. |
+| Target class | Smart contracts and OSS are both fine | Start with smart contracts, because there is better backtest data and PoCs are deterministic. OSS comes second. |
+| Ownership | Personal, possible product later | Single user, SQLite, no multi-tenancy. Keep stage interfaces clean so it can become a product later. |
+
+**Local-lane throughput options** (configurable via `router.yaml`):
+1. Default: Ollama with concurrency=1 and a persistent queue.
+2. Worth checking: Ollama's `OLLAMA_NUM_PARALLEL` setting may allow concurrent requests on your version, at a VRAM cost.
+3. Upgrade path: vLLM with `--tensor-parallel-size 2` across both 3090s, which batches requests continuously and gives much higher throughput.
+4. Overflow lane: when the local queue backs up, Claude Haiku 5.5 is cheap enough to use for bulk work ($0.10/$0.50 per MTok, half that via batch).
+
+---
+
+## 1. Opinion (summary; unchanged from v0.1)
+- **The idea is sound. "Automate all public bounties" is not.** Broad web scanning is crowded (XBOW, platform-native agents like Bugcrowd's Savant Pathseeker).
+- **Platforms penalize unvalidated AI reports.** HackerOne changed its policy in Feb 2026 and Bugcrowd its enforcement in Mar 2026. HackerOne paused the Internet Bug Bounty in Mar 2026.
+- **Duplicates pay $0**, and bad reports damage your reputation.
+- **Where a solo operator has an edge:**
+  1. Source-available targets that can be reproduced offline (smart contracts, audit contests, OSS).
+  2. Depth over breadth.
+  3. Deterministic PoC validation as the moat.
+  4. **Backtesting** on past contests with published findings before spending on live targets.
+- **Expectations:** a skill-building side project that might pay occasionally. Budget 3–6 months before the first meaningful payout.
+
+## 2. Scope & Strategy
+| Phase | Target class | Live-system contact |
+|---|---|---|
+| 0 | Practice targets (Damn Vulnerable DeFi, Ethernaut) + policy research | None |
+| 1 | Backtest on past Code4rena/Sherlock contests | None |
+| 2 | Live audit contests + Immunefi smart-contract programs | None (local mainnet fork) |
+| 3 | OSS programs with source in scope | None (local build) |
+| 4 (optional) | Web/API programs that explicitly allow automation | Yes, behind human approval gates |
+
+The pipeline never covers: social engineering, DoS, out-of-scope assets, or auto-submission.
+
+## 3. Non-negotiable Rules of Engagement (enforced in code)
+1. **Scope as code.** Every action checks a parsed, human-confirmed policy record. Deny by default.
+2. **No live network access by default.** Sandboxes have no egress except an allowlist (package mirrors, RPC endpoints for fork *reads*).
+3. **Two-tier review.** Opus does the full adversarial review (stage F2). The human still makes the final call and submits manually, because submissions go out under the human's account and platforms hold the researcher responsible. That final read is short because Opus has done the heavy lifting.
+4. **Program AI policy.** Store each program's AI/automation rules. Skip programs that ban them. Disclose AI assistance where required.
+5. **PoC or it didn't happen.** A deterministic validator must pass before anything is drafted.
+6. **No sensitive data.** If a PoC would expose real user data, stop and escalate.
+7. **Cost caps.** Per-target, per-day and monthly hard caps, plus a kill switch. Default monthly cap: $75.
+
+## 4. Architecture
+```
+[A Intel] → [B Fetch] → [C Triage: local queue] → [D Deep Analysis: Opus] → [E Validate: deterministic]
+                                                                                   ↓
+ [H Ledger/EV] ← [G Report + Human Gate] ← [F2 Opus Skeptic Review] ← [F Dedup/Novelty]
+```
+- **A. Program Intel:** pull data from:
+  - `arkadiyt/bounty-targets-data`
+  - Immunefi listings
+  - Code4rena, Sherlock and Cantina feeds
+
+  The local model parses each policy into a structured record, which a human confirms once per program. Each program gets an EV score:
+
+  `EV = max_payout × tooling_fit × freshness ÷ competition`
+- **B. Fetch:** pinned commit or block. Snapshots are immutable.
+- **C. Triage (local queue, overnight):**
+  - Run Slither, Aderyn, Semgrep and CodeQL.
+  - The local model writes per-file summaries, a value-flow and trust-boundary map, and a hotspot ranking.
+  - Output: the top-K hotspots.
+- **D. Deep Analysis (Opus 5.5):**
+  - The codebase and triage map are sent as a **cached prefix**.
+  - Opus generates exploit hypotheses per hotspot and writes Foundry or other PoCs.
+  - It iterates on PoC failures within a per-target turn and $ cap.
+- **E. Validation (deterministic):**
+  - The PoC must pass in the sandbox: a fork test showing loss or invariant break, or an ASan crash.
+  - **PoC-cheat lint:** flag Foundry cheatcodes that fake the exploit, such as `vm.prank` as owner/admin, `vm.deal`/`deal` beyond realistic attacker capital, `vm.store` on protocol state, or mocked oracles not in the threat model. LLM-written PoCs often cheat this way.
+- **F. Dedup/Novelty:** check against known-issues lists, prior audits, public disclosures, GitHub issues, CVE/GHSA, and (for backtests) the contest's own findings.
+- **F2. Opus Skeptic Review:** a separate Opus call (Batch API) that tries to *refute* the finding. It checks:
+  - scope
+  - attacker preconditions and privileges
+  - whether the PoC is realistic
+  - severity under the program's own rubric
+  - known-issue overlap
+
+  It outputs a verdict (`submit` / `reject` / `flag-for-human`), a confidence score and specific concerns. Rejections are logged, not deleted, so the skeptic's accuracy can be audited later.
+- **G. Report + Human Gate:** a **one-page review packet**:
+  - TL;DR and severity
+  - why it is novel
+  - the skeptic's concerns
+  - a one-command PoC rerun (`make verify FINDING=…`)
+  - the draft report
+
+  It is delivered in a weekly digest, both as a markdown file (`digests/YYYY-WW.md`) and as a short Slack summary via `notify-on-complete`.
+- **H. Ledger:** $ per stage, per target and per month. Outcomes. Skeptic accuracy (verdict vs. platform outcome). The data feeds EV scoring and model routing.
+
+## 5. Model Routing & Cost Model
+Prices are from Anthropic's pricing docs as of 2026-11-21, per MTok:
+- **Opus 5.5:** $4 input / $20 output; batch $2 / $10; cache hit $0.20
+- **Sonnet 5.5:** $2 / $10; batch $1 / $5
+- **Haiku 5.5:** $0.10 / $0.50
+
+The 4.7+ tokenizer produces about 30% more tokens than older models, so the estimates assume that.
+
+| Stage | Default | Fallback / experiment |
+|---|---|---|
+| A policy parsing, C summaries/hotspots, F similarity | Local Qwen (free, serial) | Haiku 5.5 overflow |
+| D hypotheses + PoC writing | Opus 5.5, cached prefix | Sonnet 5.5 (A/B in backtest) |
+| F2 skeptic review | Opus 5.5 via Batch API | n/a |
+| G report draft | Sonnet 5.5 via Batch API | Local |
+
+**Estimated cost per mid-size contest** (~200k-token codebase):
+| Item | Cost |
+|---|---|
+| Cache write | ~$1–2 |
+| ~20 hypothesis turns on cache | ~$1 input + ~$2 output |
+| PoC iteration | ~$3–4 |
+| Skeptic and report | <$1 |
+| **Total** | **~$8–10 per contest on Opus**, roughly half on Sonnet |
+
+So **$75/month covers ~7–9 deep runs**. The EV ranking has to be selective. These numbers are estimates, and the Phase 1 ledger replaces them with real ones.
+
+Note: frontier models may refuse some exploit-development prompts. Local-fork PoCs for authorized contests are usually fine. If refusals become a problem, look into Anthropic's Cyber Verification Program (access for verified security research).
+
+## 6. Data Model (SQLite)
+- `programs`
+- `scope_assets`
+- `policies` (parsed + `human_confirmed`)
+- `targets` (snapshot hash)
+- `hotspots`
+- `hypotheses`
+- `pocs` (status, logs, `cheat_flags`)
+- `findings`
+- `reviews` (skeptic verdict, confidence, concerns)
+- `submissions` (platform, status, payout)
+- `costs` (stage, model, tokens, $)
+- `jobs` (local queue: state, retries)
+
+## 7. Tech Stack
+- Python 3.12, uv, Typer CLI, SQLite, Docker sandboxes
+- Foundry, Slither, Aderyn, Semgrep, CodeQL
+- Anthropic SDK, plus an OpenAI-compatible client for Ollama/vLLM
+- Every dependency goes through the **security-auditor** gate before install
+
+Layout:
+```
+bounty_agent/{intel,fetch,triage,analysis,validate,dedup,review,report,ledger,router,queue}/
+benchmarks/   # practice targets + historical contests + scoring harness
+sandbox/      # Dockerfiles per target type
+docs/         # architecture, how-tos, learning path (§12)
+```
+
+## 8. Roadmap
+- **Phase 0 (1–2 wks): research, practice, skeleton**
+  - Verify current AI/automation policies, **age requirements** and KYC/tax rules on Immunefi, Code4rena, Sherlock and Cantina.
+  - **Create accounts (human task):** Code4rena and Sherlock first, since they're needed for live contests in Phase 2. Immunefi and Cantina next. Backtesting doesn't need accounts, because past contest repos and findings are public.
+  - Confirm the `llm-server` Ollama endpoint is reachable from the dev machine, and benchmark tokens/sec for `qwen3.8:27b`.
+  - Repo skeleton, ledger with cost caps, router, local job queue.
+  - End-to-end smoke test on **Damn Vulnerable DeFi** challenges. Known bugs and small codebases make for cheap, deterministic fixtures at <$1 each.
+- **Phase 1 (4–6 wks, ~$50–80 total): backtest MVP**
+  - Stages B–F2 on 8–10 past Code4rena/Sherlock contests.
+  - Metrics: recall on known High/Medium findings, post-validation false-positive rate, skeptic accuracy, $ per contest.
+  - A/B test Opus vs. Sonnet for stage D on a subset.
+- **Phase 2:** live, one contest or Immunefi program at a time, chosen by EV.
+- **Phase 3:** OSS programs, adding fuzz-harness generation.
+- **Phase 4:** web targets, only after the earlier phases show a positive ROI.
+
+## 9. Economics & Kill Criteria
+- **Go to Phase 2** if all of these hold:
+  - the backtest finds ≥15% of known High/Medium findings
+  - fewer than 1 false positive per contest reaches the human gate
+  - average cost is ≤$10 per contest
+- **Kill or pivot** after 3 months live if any of these hold:
+  - cumulative payouts are below 2× spend
+  - the duplicate rate is above 60%
+  - the human gate regularly takes more than 1 hr/week
+
+## 10. Key Risks
+| Risk | Mitigation |
+|---|---|
+| Reputation damage | PoC-only, PoC-cheat lint, Opus skeptic, human final gate |
+| Legal / out-of-scope activity | No live contact through Phase 3, scope-as-code, deny by default |
+| Budget overrun | Hard monthly cap, local-first, batch + cache, EV-selective deep runs |
+| Prompt injection from target code | No egress, no secrets in sandbox, read-only tools. Target content is untrusted. |
+| Policy changes | Re-parse on each run. A changed policy forces human re-confirmation. |
+| Minor operating accounts | Submissions and payouts stay under the adult account holder unless a platform's terms explicitly allow minors |
+
+## 11. Decisions & Open Questions
+**Decided (2026-11-21)**
+- Local LLM runs on host `llm-server`.
+- No platform accounts yet, so creating them is a Phase 0 human task.
+- The digest goes out as both a markdown file and Slack.
+- The code lives in a private GitHub repo.
+
+**Open**
+1. Confirm the Ollama port on `llm-server` (default 11434), and whether it's reachable from WSL.
+2. Should the son get his own GitHub account as a collaborator now, or later?
+
+## 12. Handoff & Learning Plan
+The project is designed so a teenage tinkerer can work on it safely and learn real skills:
+- **Safe by default:** sandbox egress is off, scope-as-code applies, and only the adult account holder can submit. No configuration flag lets the pipeline hit a live target before Phase 4, and even then it needs explicit approval.
+- **Learning path:** each step teaches a skill, and each finished step turns into a test fixture:
+  1. Ethernaut and Damn Vulnerable DeFi by hand
+  2. Write a Slither detector
+  3. Improve a pipeline stage
+  4. Run a backtest and read the metrics
+- **Good first issues:**
+  - new static-analysis adapter
+  - PoC-cheat lint rules
+  - dashboard for ledger metrics
+  - EV-score tuning from backtest data
+  - local-lane throughput (vLLM migration)
+- **Docs:** `CLAUDE.md` with project conventions, `docs/architecture.md`, and a `docs/learning-path.md`.
+- **Metrics are the teacher.** The backtest harness gives objective feedback (recall, false positives, $), so changes can be judged by numbers, not vibes.
+
+## Verification (of the MVP)
+- Unit tests per stage. An end-to-end run on 1 Damn Vulnerable DeFi challenge and 1 archived contest produces validated PoCs, a skeptic review, a review packet and ledger rows.
+- Backtest report table: recall, precision, skeptic accuracy and $ per contest, compared with published findings.
+- Guardrail tests:
+  - the sandbox blocks egress
+  - out-of-scope targets are refused
+  - the monthly cap halts frontier calls
+  - the PoC-cheat lint catches seeded cheating PoCs
