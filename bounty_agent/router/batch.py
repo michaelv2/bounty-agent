@@ -15,7 +15,9 @@ while the batch runs. At collect time the actual cost is recorded and the reserv
 from __future__ import annotations
 
 import re
+import uuid
 from collections import defaultdict
+from contextlib import contextmanager
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -29,6 +31,18 @@ CUSTOM_ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")  # the API's own rule
 
 class BatchError(RuntimeError):
     pass
+
+
+@contextmanager
+def _tx(conn):
+    """One explicit transaction; ROLLBACK on any error so the connection is never left mid-transaction."""
+    conn.execute("BEGIN")
+    try:
+        yield
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
 
 
 @dataclass(frozen=True)
@@ -142,28 +156,52 @@ class BatchRunner:
                 params["cache_control"] = {"type": "ephemeral"}
             requests.append({"custom_id": i.custom_id, "params": params})
 
-        batch_id = self.client.create(requests)
-        ts = self.router.ledger.now_ts()
-        self.conn.execute("BEGIN")
-        self.conn.execute(
-            "INSERT INTO batches (id, stage, model, created_ts) VALUES (?, ?, ?, ?)",
-            (batch_id, stage, route.model, ts),
-        )
-        self.conn.executemany(
-            "INSERT INTO batch_items (batch_id, custom_id, target_id, estimate_usd) VALUES (?, ?, ?, ?)",
-            [(batch_id, i.custom_id, i.target_id, estimates[i.custom_id]) for i in items],
-        )
-        self.conn.execute("COMMIT")
-        return batch_id
+        # Reserve FIRST, under a local id, so the paid API call can never happen without a
+        # reservation in the ledger. If create() fails, the reservation is released.
+        local_id = f"local_{uuid.uuid4().hex[:24]}"
+        with _tx(self.conn):
+            self.conn.execute(
+                "INSERT INTO batches (id, stage, model, status, created_ts) VALUES (?, ?, ?, 'reserving', ?)",
+                (local_id, stage, route.model, self.router.ledger.now_ts()),
+            )
+            self.conn.executemany(
+                "INSERT INTO batch_items (batch_id, custom_id, target_id, estimate_usd) VALUES (?, ?, ?, ?)",
+                [(local_id, i.custom_id, i.target_id, estimates[i.custom_id]) for i in items],
+            )
+        try:
+            api_id = self.client.create(requests)
+        except BaseException:
+            with _tx(self.conn):
+                self.conn.execute("DELETE FROM batch_items WHERE batch_id = ?", (local_id,))
+                self.conn.execute("DELETE FROM batches WHERE id = ?", (local_id,))
+            raise
+        # If this write fails the reservation stays in place (status 'reserving'): money is
+        # held, never double-spent. The API id goes in the error so it can be recovered.
+        try:
+            with _tx(self.conn):
+                self.conn.execute("UPDATE batches SET api_id = ?, status = 'in_progress' WHERE id = ?",
+                                  (api_id, local_id))
+        except Exception as exc:
+            raise BatchError(f"batch {api_id} was created but not recorded ({exc}); "
+                             f"its reservation {local_id} is still held") from exc
+        return local_id
 
     def collect(self, batch_id: str) -> dict[str, Completion] | None:
-        """Record costs and return {custom_id: Completion} for succeeded items, or None if not done yet."""
-        row = self.conn.execute("SELECT stage, model, status FROM batches WHERE id = ?", (batch_id,)).fetchone()
+        """Record costs and return {custom_id: Completion} for succeeded items, or None if not done yet.
+
+        `batch_id` is the local id returned by submit(). Everything is written in one
+        transaction: on any error nothing is recorded and the batch can be collected again.
+        """
+        row = self.conn.execute("SELECT stage, model, status, api_id FROM batches WHERE id = ?",
+                                (batch_id,)).fetchone()
         if row is None:
             raise BatchError(f"unknown batch {batch_id!r}")
         if row["status"] == "ended":
             raise BatchError(f"batch {batch_id!r} was already collected")
-        if self.client.status(batch_id) != "ended":
+        if row["status"] != "in_progress" or not row["api_id"]:
+            raise BatchError(f"batch {batch_id!r} is {row['status']!r}, not collectable")
+        api_id = row["api_id"]
+        if self.client.status(api_id) != "ended":
             return None
 
         targets = {
@@ -171,31 +209,30 @@ class BatchRunner:
             for r in self.conn.execute("SELECT custom_id, target_id FROM batch_items WHERE batch_id = ?", (batch_id,))
         }
         done: dict[str, Completion] = {}
-        self.conn.execute("BEGIN")
-        for res in self.client.results(batch_id):
-            if res.custom_id not in targets:
-                continue  # not ours; never trust unknown IDs
-            if res.type == "succeeded":
-                self.router.ledger.record(
-                    stage=row["stage"], model=row["model"], usage=res.usage,
-                    target_id=targets[res.custom_id], batch=True,
+        with _tx(self.conn):
+            for res in self.client.results(api_id):
+                if res.custom_id not in targets:
+                    continue  # not ours; never trust unknown IDs
+                if res.type == "succeeded":
+                    self.router.ledger.record(
+                        stage=row["stage"], model=row["model"], usage=res.usage,
+                        target_id=targets[res.custom_id], batch=True,
+                    )
+                    done[res.custom_id] = Completion(text=res.text, model=row["model"], usage=res.usage)
+                self.conn.execute(
+                    "UPDATE batch_items SET state = ?, result_text = ?, error = ? WHERE batch_id = ? AND custom_id = ?",
+                    (res.type, res.text or None, res.error or None, batch_id, res.custom_id),
                 )
-                done[res.custom_id] = Completion(text=res.text, model=row["model"], usage=res.usage)
+            # Anything the API didn't return a result for is released (not billed).
             self.conn.execute(
-                "UPDATE batch_items SET state = ?, result_text = ?, error = ? WHERE batch_id = ? AND custom_id = ?",
-                (res.type, res.text or None, res.error or None, batch_id, res.custom_id),
+                "UPDATE batch_items SET state = 'expired', error = 'no result returned' "
+                "WHERE batch_id = ? AND state = 'pending'",
+                (batch_id,),
             )
-        # Anything the API didn't return a result for is released (not billed).
-        self.conn.execute(
-            "UPDATE batch_items SET state = 'expired', error = 'no result returned' "
-            "WHERE batch_id = ? AND state = 'pending'",
-            (batch_id,),
-        )
-        self.conn.execute(
-            "UPDATE batches SET status = 'ended', ended_ts = ? WHERE id = ?",
-            (self.router.ledger.now_ts(), batch_id),
-        )
-        self.conn.execute("COMMIT")
+            self.conn.execute(
+                "UPDATE batches SET status = 'ended', ended_ts = ? WHERE id = ?",
+                (self.router.ledger.now_ts(), batch_id),
+            )
         return done
 
     def pending(self) -> list[str]:

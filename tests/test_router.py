@@ -86,3 +86,11 @@ def test_unknown_stage_and_alias_are_errors(router):
         router.complete(stage="nonexistent", system="s", messages=msgs())
     with pytest.raises(KeyError, match="alias"):
         router.complete(stage="broken_alias", system="s", messages=msgs())
+
+
+def test_non_ascii_padding_is_not_underestimated():
+    """Bug hunt 2026-11-21: 3 chars/token badly undercounts emoji/CJK in hostile targets."""
+    from bounty_agent.router.router import estimate_tokens
+
+    assert estimate_tokens("a" * 3000) == pytest.approx(1001, abs=1)
+    assert estimate_tokens("😀" * 1000) >= 4000  # 4 UTF-8 bytes each, each byte can be a token

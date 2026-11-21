@@ -99,3 +99,53 @@ def test_invalid_batches_rejected(runner, client, ids):
 def test_local_stage_cannot_be_batched(runner):
     with pytest.raises(BatchError, match="local"):
         runner.submit("triage", [item("x")])
+
+
+# ---- bug hunt 2026-11-21 ----
+
+def test_failed_create_releases_the_reservation(runner, client, ledger, conn):
+    def boom(requests):
+        raise RuntimeError("API down")
+    client.create = boom
+    with pytest.raises(RuntimeError, match="API down"):
+        runner.submit("skeptic_review", [item("f-1", target_id=1)])
+    assert ledger.reserved_target(1) == 0
+    assert conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
+
+
+def test_reservation_exists_before_the_paid_call(runner, client, ledger):
+    seen = {}
+
+    def create(requests):
+        seen["reserved"] = ledger.reserved_target(1)  # what the ledger shows at the moment we pay
+        return "msgbatch_x"
+    client.create = create
+    runner.submit("skeptic_review", [item("f-1", target_id=1)])
+    assert seen["reserved"] > 0
+
+
+def test_reservation_still_counts_after_midnight(runner, ledger, guard, clock):
+    from datetime import timedelta
+
+    runner.submit("skeptic_review", [item("big", max_tokens=450_000)])  # ~$4.50 reserved, daily cap $5
+    clock.dt += timedelta(days=1)  # the batch is still pending the next day
+    assert ledger.reserved_day() == pytest.approx(4.5, abs=0.01)
+    with pytest.raises(BudgetExceeded, match="daily"):
+        guard.check(1.0)
+
+
+def test_collect_error_rolls_back_and_can_retry(runner, client, ledger, conn):
+    bid = runner.submit("skeptic_review", [item("ok", target_id=2)])
+    client.state = "ended"
+
+    def broken_results(_):
+        yield BatchResult("ok", "succeeded", text="x", usage=Usage(10_000, 1_000))
+        raise RuntimeError("connection reset while streaming results")
+    client.results = broken_results
+    with pytest.raises(RuntimeError, match="connection reset"):
+        runner.collect(bid)
+    assert ledger.spent_target(2) == 0 and ledger.reserved_target(2) > 0  # nothing half-recorded
+    assert not conn.in_transaction
+    client.results = lambda _: [BatchResult("ok", "succeeded", text="x", usage=Usage(10_000, 1_000))]
+    assert set(runner.collect(bid)) == {"ok"}
+    assert ledger.spent_target(2) == pytest.approx(0.03) and ledger.reserved_target(2) == 0

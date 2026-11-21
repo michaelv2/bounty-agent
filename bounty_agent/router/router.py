@@ -29,7 +29,12 @@ class Route:
 
 
 def estimate_tokens(text: str) -> int:
-    return len(text) // CHARS_PER_TOKEN_ESTIMATE + 1
+    """Conservative token estimate. ASCII at ~3 chars/token; every non-ASCII character is
+    charged its UTF-8 byte count (each byte can be its own token), since target content is
+    attacker-controlled and emoji/CJK padding would otherwise be badly underestimated."""
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    non_ascii_bytes = len(text.encode("utf-8")) - ascii_chars
+    return ascii_chars // CHARS_PER_TOKEN_ESTIMATE + non_ascii_bytes + 1
 
 
 def estimate_cost(model: str, system: str, messages: list[Message], max_tokens: int,

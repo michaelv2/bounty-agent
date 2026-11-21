@@ -97,11 +97,15 @@ class Ledger:
         ).fetchone()
         return float(row[0])
 
+    # A pending batch is billed when it is collected, which can be on a later day or month
+    # than it was submitted. So every pending reservation counts against the *current* day
+    # and month, whenever it was created. (Filtering by created_ts let a batch submitted at
+    # 23:50 escape the next day's cap.)
     def reserved_month(self) -> float:
-        return self._reserved("b.created_ts LIKE ?", (self.clock().strftime("%Y-%m-") + "%",))
+        return self._reserved("1 = 1", ())
 
     def reserved_day(self) -> float:
-        return self._reserved("b.created_ts LIKE ?", (self.clock().strftime("%Y-%m-%d") + "%",))
+        return self._reserved("1 = 1", ())
 
     def reserved_target(self, target_id: int) -> float:
         return self._reserved("i.target_id = ?", (target_id,))

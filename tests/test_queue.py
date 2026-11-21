@@ -46,3 +46,23 @@ def test_requeue_stale_running_jobs(conn):
     conn.execute("UPDATE jobs SET claimed_at = datetime('now', '-2 hours')")
     assert q.requeue_stale(older_than_minutes=60) == 1
     assert q.counts() == {"queued": 1}
+
+
+def test_job_that_kills_the_worker_is_not_retried_forever(conn):
+    """Bug hunt 2026-11-21: requeue_stale ignored max_attempts."""
+    q = JobQueue(conn)
+    q.enqueue("oom", {}, max_attempts=2)
+    for _ in range(2):  # the worker dies mid-job twice
+        assert q.claim() is not None
+        conn.execute("UPDATE jobs SET claimed_at = datetime('now', '-2 hours')")
+        q.requeue_stale(older_than_minutes=60)
+    row = conn.execute("SELECT state, attempts, error FROM jobs").fetchone()
+    assert row["state"] == "failed" and row["attempts"] == 2 and "every attempt" in row["error"]
+    assert q.claim() is None
+
+
+def test_claim_skips_exhausted_jobs(conn):
+    q = JobQueue(conn)
+    q.enqueue("x", {}, max_attempts=1)
+    conn.execute("UPDATE jobs SET attempts = 1")  # e.g. state edited by hand
+    assert q.claim() is None

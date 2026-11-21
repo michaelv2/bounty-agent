@@ -70,7 +70,7 @@ def batches() -> None:
     """List Message Batches and their items' states."""
     _, conn = _ctx()
     rows = conn.execute(
-        """SELECT b.id, b.stage, b.status, b.created_ts, COUNT(i.custom_id) AS n,
+        """SELECT b.id, b.api_id, b.stage, b.status, b.created_ts, COUNT(i.custom_id) AS n,
                   SUM(i.state = 'pending') AS pending, COALESCE(SUM(i.estimate_usd), 0) AS est
            FROM batches b LEFT JOIN batch_items i ON i.batch_id = b.id
            GROUP BY b.id ORDER BY b.created_ts DESC LIMIT 20"""
@@ -78,7 +78,7 @@ def batches() -> None:
     if not rows:
         typer.echo("No batches.")
     for r in rows:
-        typer.echo(f"{r['id']}  {r['stage']:<15} {r['status']:<11} items={r['n']} pending={r['pending']} "
+        typer.echo(f"{r['id']} ({r['api_id'] or 'not created'})  {r['stage']:<15} {r['status']:<11} items={r['n']} pending={r['pending']} "
                    f"max=${r['est']:.2f}  created {r['created_ts']}")
 
 

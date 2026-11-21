@@ -21,7 +21,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import tempfile
 import time
@@ -31,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bounty_agent.config import SandboxConfig
+from bounty_agent.fsutil import UnsafeTree, reject_special_files, strip_escaping_symlinks
 
 # Paths inside the container. HOME is on the /tmp tmpfs (noexec). forge keeps solc in
 # $HOME/.svm and ignores SVM_HOME, so the compiler cache is bind-mounted exactly there.
@@ -153,6 +153,27 @@ def _name(kind: str) -> str:
     return f"bounty-{kind}-{uuid.uuid4().hex[:12]}"
 
 
+def _container_exists(name: str) -> bool:
+    r = subprocess.run(["docker", "ps", "-aq", "--filter", f"name=^{name}$"], capture_output=True, text=True)
+    return bool(r.stdout.strip())
+
+
+def _force_remove(name: str, attempts: int = 10, delay_s: float = 1.0) -> None:
+    """`docker rm -f` until the container is confirmed gone twice in a row, `delay_s` apart.
+
+    Twice, because a container whose create request was still in flight when the client
+    died can appear after a first "not found".
+    """
+    gone_in_a_row = 0
+    for _ in range(attempts):
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        gone_in_a_row = gone_in_a_row + 1 if not _container_exists(name) else 0
+        if gone_in_a_row >= 2:
+            return
+        time.sleep(delay_s)
+    raise SandboxError(f"could not remove sandbox container {name}; remove it by hand (docker rm -f {name})")
+
+
 def _run(args: list[str], name: str, timeout_s: float) -> RunResult:
     """Run with a wall-clock timeout and capped output; kill the container on either limit."""
     start = time.monotonic()
@@ -171,6 +192,9 @@ def _run(args: list[str], name: str, timeout_s: float) -> RunResult:
                 except subprocess.TimeoutExpired:
                     p.kill()
                     p.wait()
+                # Killing the `docker run` client doesn't stop the container, and `docker kill`
+                # fails if the container is still being created. Make sure it's really gone.
+                _force_remove(name)
                 break
             time.sleep(0.1)
 
@@ -296,27 +320,14 @@ def required_solc_versions(snapshot: Path) -> set[str]:
 # --------------------------------------------------------------------------- scratch copy
 
 def _reject_special_files(root: Path) -> None:
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        for n in dirnames + filenames:
-            mode = os.lstat(os.path.join(dirpath, n)).st_mode
-            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
-                raise SandboxError(f"special file in snapshot: {os.path.join(dirpath, n)}")
+    try:
+        reject_special_files(root)
+    except UnsafeTree as exc:
+        raise SandboxError(str(exc)) from None
 
 
 def _strip_escaping_symlinks(work: Path) -> list[str]:
-    """Remove symlinks that are absolute or point outside the scratch copy. Returns what was removed."""
-    root = work.resolve()
-    removed = []
-    for dirpath, dirnames, filenames in os.walk(work, followlinks=False):
-        for n in dirnames + filenames:
-            p = Path(dirpath) / n
-            if p.is_symlink():
-                link = os.readlink(p)
-                resolved = Path(os.path.realpath(p))
-                if os.path.isabs(link) or not resolved.is_relative_to(root):
-                    p.unlink()
-                    removed.append(str(p.relative_to(work)))
-    return removed
+    return strip_escaping_symlinks(work)
 
 
 def _no_symlink_components(work: Path, rel: str) -> None:
@@ -427,7 +438,14 @@ def _default_config(cfg: SandboxConfig, cache: SolcCache) -> dict:
             name = _name("cfg")
             r = _run(base_args(cfg, name=name, target=proj, solc_dir=cache.svm, network=False, profile=profile)
                      + ["forge", "config", "--json"], name, 120)
-        _DEFAULTS_CACHE = json.loads(r.stdout) if r.ok else {}
+        if not r.ok:
+            # Don't cache a failure: an empty dict would silently turn off config review notes
+            # (sender, initial_balance, ...) for every later run in this process.
+            raise SandboxError(f"could not read forge default config: {(r.stderr or r.stdout)[-300:]}")
+        try:
+            _DEFAULTS_CACHE = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            raise SandboxError("forge default config is not valid JSON") from None
     return _DEFAULTS_CACHE
 
 

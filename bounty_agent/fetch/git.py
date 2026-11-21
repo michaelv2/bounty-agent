@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from bounty_agent.fsutil import UnsafeTree, reject_special_files, strip_escaping_symlinks
+
 ALLOWED_HOSTS = frozenset({"github.com"})
 # Libraries vendor their own test deps as nested submodules (OZ -> forge-std -> ds-test ...),
 # which builds rarely need. Deeper than this, submodules are skipped and recorded, not fetched;
@@ -69,7 +71,8 @@ class Snapshot:
     commit: str
     content_hash: str
     submodules: list[dict] = field(default_factory=list)  # [{"path", "url", "commit"}]
-    skipped: list[str] = field(default_factory=list)      # nested submodule paths beyond the depth limit
+    skipped: list[str] = field(default_factory=list)      # submodules not fetched (too deep, or stale entry)
+    removed_links: list[str] = field(default_factory=list)  # absolute/escaping symlinks stripped from the tree
 
 
 def validate_url(url: str) -> str:
@@ -90,9 +93,11 @@ def validate_url(url: str) -> str:
 def resolve_submodule_url(parent_url: str, url: str) -> str:
     """Resolve a .gitmodules URL (absolute, or relative like ../repo.git) and validate it."""
     if url.startswith(("../", "./")):
-        base = parent_url.rstrip("/").split("/")
+        base = parent_url.rstrip("/").split("/")  # ["https:", "", "github.com", owner, repo]
         for seg in url.split("/"):
             if seg == "..":
+                if len(base) <= 3:  # never climb above the host
+                    raise FetchError(f"relative submodule URL climbs above the host: {url!r}")
                 base.pop()
             elif seg not in ("", "."):
                 base.append(seg)
@@ -226,13 +231,14 @@ class HardenedGit:
         if head != commit:
             raise FetchError(f"fetched {head}, expected {commit}")
 
-    def gitlink(self, repo: Path, path: str) -> str:
-        """Commit SHA the parent repo pins for submodule `path`."""
+    def gitlink(self, repo: Path, path: str) -> str | None:
+        """Commit SHA the parent repo pins for submodule `path`, or None if there is no gitlink
+        (a stale .gitmodules entry, which `git submodule update` also ignores)."""
         out = self.run("ls-tree", "HEAD", "--", path, cwd=repo).strip()
         parts = out.split()
-        if len(parts) < 3 or parts[0] != "160000" or parts[1] != "commit" or not _SHA.match(parts[2]):
-            raise FetchError(f"no pinned submodule commit for {path!r}")
-        return parts[2]
+        if len(parts) >= 3 and parts[0] == "160000" and parts[1] == "commit" and _SHA.match(parts[2]):
+            return parts[2]
+        return None
 
 
 def _fetch_tree(git: HardenedGit, url: str, commit: str, dest: Path, depth: int, seen: list[dict],
@@ -248,6 +254,9 @@ def _fetch_tree(git: HardenedGit, url: str, commit: str, dest: Path, depth: int,
             continue
         sub_url = resolve_submodule_url(url, sub_url)
         sub_commit = git.gitlink(dest, path)
+        if sub_commit is None:
+            skipped.append(str(dest / path))  # stale .gitmodules entry: nothing pinned
+            continue
         if len(seen) >= MAX_SUBMODULES:
             raise FetchError(f"more than {MAX_SUBMODULES} submodules")
         target = dest / path
@@ -313,12 +322,18 @@ def fetch_snapshot(url: str, ref: str, snapshots_dir: Path, *, git: HardenedGit 
             skipped: list[str] = []
             _fetch_tree(git, url, commit, work, 0, seen, skipped)
             _strip_git_dirs(work)
+            try:
+                reject_special_files(work)
+            except UnsafeTree as exc:
+                raise FetchError(str(exc)) from None
+            # Host-side stages read snapshot files directly, so links to host files must go.
+            removed_links = strip_escaping_symlinks(work)
             subs = [{**s, "path": str(Path(s["path"]).relative_to(work))} for s in seen]
             skipped = [str(Path(p).relative_to(work)) for p in skipped]
             digest = content_hash(work)
             work.rename(final)
         _make_read_only(final)
-        return Snapshot(final, url, commit, digest, subs, skipped)
+        return Snapshot(final, url, commit, digest, subs, skipped, removed_links)
     finally:
         if own:
             git.close()

@@ -33,6 +33,10 @@ NON_SUPPRESSIBLE = frozenset({"ffi"})
 
 # Common names for the cheatcode handle: forge-std's `vm`, older `hevm`, `cheats`.
 CHEAT = r"\b(?:vm|hevm|cheats?|_vm)\s*\.\s*"
+# Cheatcode names distinctive enough to flag on ANY receiver, so `Vm v = vm; v.etch(...)` is caught
+# even without the alias rule. Generic names (store, load, deal, skip, warp) stay tied to CHEAT;
+# aliasing the handle is flagged on its own (cheat-alias).
+ANY = r"(?:" + CHEAT + r"|\.\s*)"
 
 PRIVILEGED_NAMES = re.compile(
     r"\b(owner|admin|gov\w*|guardian|operator|keeper|multisig|timelock|deployer|dao|"
@@ -44,20 +48,25 @@ ALLOW = re.compile(r"//\s*cheatlint-allow:\s*([a-z-]+)\s+(\S.*)$")
 
 # (rule, severity, pattern, message). Patterns run on a single statement.
 RULES: list[tuple[str, str, re.Pattern, str]] = [
-    ("ffi", HIGH, re.compile(CHEAT + r"(?:ffi|tryFfi)\s*\("),
+    ("ffi", HIGH, re.compile(ANY + r"(?:ffi|tryFfi)\s*\("),
      "runs shell commands; disabled in the sandbox and never legitimate in a PoC"),
     ("vacuous-pass", HIGH, re.compile(CHEAT + r"(?:skip|assume|assumeNoRevert)\s*\("),
      "can make the test pass or skip without the exploit happening"),
-    ("storage-write", HIGH, re.compile(CHEAT + r"store\s*\(|\bstdstore\b[\s\S]*\.\s*checked_write\s*\("),
+    ("storage-write", HIGH, re.compile(CHEAT + r"store\s*\(|" + ANY + r"(?:copyStorage|setArbitraryStorage)\s*\("
+                                       r"|\bstdstore\b[\s\S]*\.\s*checked_write\s*\("),
      "writes protocol storage directly"),
-    ("mock-call", HIGH, re.compile(CHEAT + r"(?:mockCall|mockCallRevert|mockCalls|mockFunction)\s*\("),
+    ("mock-call", HIGH, re.compile(ANY + r"(?:mockCall|mockCallRevert|mockCalls|mockFunction)\s*\("),
      "mocks a call (e.g. an oracle) instead of using real state"),
-    ("code-etch", HIGH, re.compile(CHEAT + r"etch\s*\(|\bdeployCodeTo\s*\("),
+    ("code-etch", HIGH, re.compile(ANY + r"etch\s*\(|\bdeployCodeTo\s*\("),
      "replaces deployed contract code"),
     ("environment", HIGH, re.compile(
         CHEAT + r"(?:setEnv|createFork|createSelectFork|selectFork|rpcUrl|rpc|writeFile|writeLine|"
         r"readFile|startBroadcast|broadcast|allowCheatcodes|setNonce|setNonceUnsafe|resetNonce)\s*\("),
      "manipulates the test environment, files or forks"),
+    ("cheat-alias", HIGH, re.compile(
+        r"\bVm\s+(?:(?:constant|immutable|internal|private|public)\s+)*[A-Za-z_]\w*\s*[=;]"
+        r"|\bVm\s*\(|\bVM_ADDRESS\b|\baddress\s*\(\s*(?:vm|hevm|cheats?)\s*\)"),
+     "aliases or re-casts the cheatcode handle; any cheatcode could hide behind it"),
     ("raw-cheatcode", HIGH, re.compile(
         r"hevm\s+cheat\s+code|0x7109709ecfa91a80626ff3989d68f67f5b1dd12d", re.IGNORECASE),
      "builds its own handle to the cheatcode address (can hide any cheatcode)"),
@@ -66,7 +75,7 @@ RULES: list[tuple[str, str, re.Pattern, str]] = [
     ("storage-read", INFO, re.compile(CHEAT + r"load\s*\("), "reads storage directly"),
 ]
 
-PRANK = re.compile(r"(?:" + CHEAT + r"(?:prank|startPrank|changePrank)|\b(?:hoax|startHoax|changePrank))\s*\(([\s\S]*)\)")
+PRANK = re.compile(r"(?:" + ANY + r"(?:prank|startPrank|changePrank)|\b(?:hoax|startHoax|changePrank))\s*\(([\s\S]*)\)")
 DEAL = re.compile(r"(?:" + CHEAT + r"deal|\bdeal|\bhoax|\bstartHoax)\s*\(([\s\S]*)\)")
 
 

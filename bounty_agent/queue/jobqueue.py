@@ -42,7 +42,7 @@ class JobQueue:
         row = self.conn.execute(
             """UPDATE jobs
                SET state = 'running', attempts = attempts + 1, claimed_at = datetime('now')
-               WHERE id = (SELECT id FROM jobs WHERE state = 'queued'
+               WHERE id = (SELECT id FROM jobs WHERE state = 'queued' AND attempts < max_attempts
                            ORDER BY priority DESC, id ASC LIMIT 1)
                RETURNING id, kind, payload, attempts, max_attempts"""
         ).fetchone()
@@ -69,7 +69,11 @@ class JobQueue:
 
     def requeue_stale(self, older_than_minutes: int = 60) -> int:
         cur = self.conn.execute(
-            """UPDATE jobs SET state = 'queued'
+            """UPDATE jobs
+               SET state = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+                   error = CASE WHEN attempts >= max_attempts
+                                THEN 'worker died or hung on every attempt' ELSE error END,
+                   finished_at = CASE WHEN attempts >= max_attempts THEN datetime('now') END
                WHERE state = 'running' AND claimed_at < datetime('now', ?)""",
             (f"-{older_than_minutes} minutes",),
         )

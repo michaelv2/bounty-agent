@@ -280,3 +280,32 @@ def test_judge_passes_only_real_successes():
 def test_judge_rejects_vacuous_or_forged_results(stdout, why):
     passed, reason, _ = judge(stdout, DEST)
     assert not passed and why in reason
+
+
+# ---- bug hunt 2026-11-21 ----
+
+def test_failed_defaults_run_is_an_error_and_not_cached(monkeypatch, tmp_path):
+    from bounty_agent.sandbox import runner
+
+    monkeypatch.setattr(runner, "_DEFAULTS_CACHE", None)
+    monkeypatch.setattr(runner, "_run", lambda *a, **k: runner.RunResult(None, "", "timeout", True, 120.0))
+    with pytest.raises(SandboxError, match="default config"):
+        runner._default_config(CFG, SolcCache(tmp_path))
+    assert runner._DEFAULTS_CACHE is None  # the next run tries again instead of using {}
+
+
+def test_force_remove_waits_for_late_containers(monkeypatch):
+    from bounty_agent.sandbox import runner
+
+    calls = []
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: calls.append(a[0]))
+    monkeypatch.setattr(runner.time, "sleep", lambda s: None)
+    # gone, then the container shows up late (create was in flight), then gone for good
+    seq = iter([False, True, False, False])
+    monkeypatch.setattr(runner, "_container_exists", lambda name: next(seq))
+    runner._force_remove("bounty-test-x")
+    assert sum(1 for c in calls if c[:3] == ["docker", "rm", "-f"]) == 4
+
+    monkeypatch.setattr(runner, "_container_exists", lambda name: True)
+    with pytest.raises(SandboxError, match="could not remove"):
+        runner._force_remove("bounty-test-y", attempts=3)

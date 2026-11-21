@@ -4,6 +4,7 @@
 The goal is side income from public bug bounty programs, using an agent pipeline that mixes local and frontier models to find, validate and write up vulnerabilities that pay out. This is a personal tool for now. It is also meant to be **handed off to a teenage tinkerer**, so it has to be safe by default, modular and well documented, and built around real problems.
 
 **Changelog**
+- v0.3.3: bug hunt (code review, 10 findings fixed, each with a regression test that fails on the old code): batch reservations now survive day/month rollover and are written before the paid API call; snapshots never keep links to host files; cheat-lint alias bypass closed; config-review defaults no longer cached on failure; crashed jobs stop retrying; stale .gitmodules entries skipped; timed-out containers verifiably removed; non-ASCII token estimates; relative submodule URLs bounded.
 - v0.3.2: hardened git fetch (stage B), DVD smoke test passing, local reasoning-model handling (`reasoning_effort`, truncation detection).
 - v0.3.1: sandbox hardened after a security review: no networked builds of target code, verified solc cache, JSON verdicts, effective-config check, symlink-safe scratch copies, rewritten cheat lint. Added the Batch API (§5) and orchestration (§4.2).
 - v0.3: execution sandbox design (§4.1): a dedicated `--network none` container rather than AgentSafe.

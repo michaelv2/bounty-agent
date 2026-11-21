@@ -126,3 +126,63 @@ def test_git_dirs_stripped_and_content_hash(tmp_path):
     assert h1 == content_hash(root)  # stable
     (root / "A.sol").write_text("contract A { }")
     assert content_hash(root) != h1  # sensitive to content
+
+
+# ---- bug hunt 2026-11-21 ----
+
+def test_relative_submodule_url_cannot_climb_above_host():
+    with pytest.raises(FetchError, match="above the host"):
+        resolve_submodule_url("https://github.com/a/b", "../../../../../../x")
+
+
+def test_stale_gitmodules_entry_has_no_gitlink(tmp_path):
+    repo = tmp_path / "r"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitmodules").write_text('[submodule "lib/old"]\n\tpath = lib/old\n\turl = https://github.com/a/old\n')
+    (repo / "A.sol").write_text("contract A {}")
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "x"], check=True, env=env)
+    g = HardenedGit(timeout_s=30)
+    try:
+        assert g.gitlink(repo, "lib/old") is None  # skipped, not fatal
+    finally:
+        g.close()
+
+
+class FakeGit:
+    """Stands in for network git: 'checks out' a hostile tree with symlinks to host files."""
+
+    def __init__(self, victim):
+        self.victim = victim
+
+    def resolve_ref(self, url, ref):
+        return "a" * 40
+
+    def checkout(self, url, commit, dest):
+        (dest / "src").mkdir(parents=True)
+        (dest / "src" / "Real.sol").write_text("contract Real {}")
+        (dest / "src" / "Vault.sol").symlink_to(self.victim)            # absolute link to a host secret
+        (dest / "src" / "Up.sol").symlink_to("../../../../etc/hostname")  # escaping relative link
+        (dest / "src" / "Alias.sol").symlink_to("Real.sol")              # harmless internal link
+
+    def gitlink(self, repo, path):
+        return None
+
+    def close(self):
+        pass
+
+
+def test_snapshot_never_keeps_links_to_host_files(tmp_path):
+    """Bug hunt 2026-11-21: host-side stages read snapshot files and would follow these links."""
+    from bounty_agent.fetch import fetch_snapshot
+
+    secret = tmp_path / "webhook"
+    secret.write_text("https://hooks.example/SECRET")
+    snap = fetch_snapshot("https://github.com/a/b", "main", tmp_path / "snaps", git=FakeGit(secret))
+    src = snap.path / "src"
+    assert not (src / "Vault.sol").exists() and not (src / "Vault.sol").is_symlink()
+    assert not (src / "Up.sol").is_symlink()
+    assert (src / "Alias.sol").is_symlink()
+    assert sorted(snap.removed_links) == ["src/Up.sol", "src/Vault.sol"]

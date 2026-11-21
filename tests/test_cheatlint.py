@@ -105,3 +105,19 @@ def test_realistic_actions_are_info_not_blocking():
     src = "vm.warp(block.timestamp + 1 days);\nvm.roll(block.number + 10);\nskip(3600);"
     flags = lint_source(src)
     assert flags and not has_blocking(flags)
+
+
+# ---- bug hunt 2026-11-21: aliasing the cheatcode handle ----
+
+@pytest.mark.parametrize("src, rule", [
+    ("Vm v = vm;\nv.store(address(vault), bytes32(0), bytes32(uint256(1)));", "cheat-alias"),
+    ("IVm x = IVm(address(vm)); x.prank(owner);", "cheat-alias"),
+    ("Vm(VM_ADDRESS).mockCall(a, b, c);", "cheat-alias"),
+    ("x.etch(target, code);", "code-etch"),
+    ("x.prank(owner);", "privileged-prank"),
+    ("vm.copyStorage(a, b);", "storage-write"),
+    ("vm.setArbitraryStorage(a);", "storage-write"),
+])
+def test_aliased_cheatcodes_caught(src, rule):
+    assert (rule, "high") in rules(src), src
+    assert has_blocking(lint_source(src))

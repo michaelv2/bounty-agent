@@ -108,10 +108,11 @@ CREATE INDEX IF NOT EXISTS idx_costs_target ON costs(target_id);
 -- Message Batches API (50% off, results within 24h). Pending items reserve their
 -- worst-case cost against the budget caps until their results are collected.
 CREATE TABLE IF NOT EXISTS batches (
-    id          TEXT PRIMARY KEY,          -- Anthropic batch ID
+    id          TEXT PRIMARY KEY,          -- local id, created before the API call
+    api_id      TEXT,                      -- Anthropic batch id, set once the batch is created
     stage       TEXT NOT NULL,
     model       TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'in_progress',  -- in_progress | ended
+    status      TEXT NOT NULL DEFAULT 'reserving',  -- reserving | in_progress | ended
     created_ts  TEXT NOT NULL,
     ended_ts    TEXT
 );
@@ -154,4 +155,14 @@ def connect(path: Path | str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Small in-place upgrades for databases created by older versions."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(batches)")}
+    if "api_id" not in cols:
+        conn.execute("ALTER TABLE batches ADD COLUMN api_id TEXT")
+        conn.execute("UPDATE batches SET api_id = id WHERE api_id IS NULL")  # old rows used the API id as id
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_api ON batches(api_id)")
