@@ -61,6 +61,30 @@ def test_parse_bad_replies(reply, msg):
         parse_reply(reply)
 
 
+NOT_EXPLOITABLE = """<hypothesis>
+title: Zero fee during grace period
+exploitable: no
+severity: low
+attacker: an unprivileged user
+impact: the zero fee is documented intended behavior, nothing is lost
+steps: none
+</hypothesis>
+"""
+
+
+def test_not_exploitable_needs_no_code_and_ignores_any_sent():
+    fields, code = parse_reply(NOT_EXPLOITABLE)
+    assert fields["exploitable"] == "no" and code is None
+    fields, code = parse_reply(NOT_EXPLOITABLE + f"```solidity\n{GOOD_POC}```")
+    assert code is None  # a passing "safe behavior" test must not be run as a PoC
+
+
+def test_missing_exploitable_line_means_yes_and_requires_code():
+    assert parse_reply(GOOD_REPLY)[0]["exploitable"] == "yes"
+    with pytest.raises(AnalysisParseError, match="code block"):
+        parse_reply("<hypothesis>\ntitle: t\nexploitable: yes\n</hypothesis>")
+
+
 def test_severity_normalized():
     r = GOOD_REPLY.replace("severity: high", "severity: CRITICAL!!")
     assert parse_reply(r)[0]["severity"] == "low"  # unknown severity is treated as low
@@ -170,6 +194,25 @@ def test_cheating_poc_is_rejected_before_the_sandbox(cfg, conn, snapshot):
     analyzer.router = FakeAnalysisRouter([cheat])
     res = analyzer.analyze(t, h)
     assert not res.passed and not ran and "cheat lint" in res.reason  # sandbox never ran
+
+
+def test_not_exploitable_verdict_is_dropped_without_a_finding(cfg, conn, snapshot):
+    """A 'no' with a passing safe-behavior test attached must not become a finding."""
+    cfg.analysis.update({"max_iterations": 3})
+    t, h = seed_target(conn, snapshot)
+    ran = []
+
+    def never(*a, **k):
+        ran.append(1)
+        return result(True)
+    analyzer = Analyzer(cfg, conn, Router.__new__(Router), poc_runner=never)
+    analyzer.router = FakeAnalysisRouter([NOT_EXPLOITABLE + f"```solidity\n{GOOD_POC}```"])
+    res = analyzer.analyze(t, h)
+    assert not res.passed and res.iterations == 1 and not ran
+    assert "not exploitable" in res.reason
+    row = conn.execute("SELECT status, summary FROM hypotheses WHERE id = ?", (res.hypothesis_id,)).fetchone()
+    assert row["status"] == "dropped" and "intended behavior" in row["summary"]
+    assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 0
 
 
 def test_unparseable_reply_is_fed_back(cfg, conn, snapshot):
