@@ -1,0 +1,33 @@
+# Model routing and budget config. No secrets in this file:
+# the Anthropic key comes from the ANTHROPIC_API_KEY environment variable.
+
+[budget]
+monthly_usd = 75.0       # hard cap on all frontier spend in a calendar month
+daily_usd = 10.0         # hard cap per calendar day
+per_target_usd = 12.0    # hard cap per target snapshot (all stages combined)
+
+# Local LLM on llm-server. The pipeline only relies on this contract:
+# an OpenAI-compatible /v1/chat/completions endpoint plus the aliases below.
+# Whoever runs llm-server can change the serving stack (Ollama, vLLM, ...)
+# as long as the contract holds.
+[local]
+base_url = "http://llm-server:11434/v1"
+timeout_s = 600
+concurrency = 1          # Ollama on llm-server currently serves one request at a time
+
+[local.aliases]
+# Keep both aliases on one model unless the backtest says otherwise. Ollama
+# swaps models in and out of VRAM, so alternating two 27-31B models would thrash.
+local-triage = "qwen3.8:27b-128k"
+local-summarize = "qwen3.8:27b-128k"
+
+# Stage -> model routes. "local:<alias>" runs on llm-server; anything else is a Claude model ID.
+[routes]
+policy_parse = "local:local-triage"
+triage = "local:local-triage"
+summarize = "local:local-summarize"
+dedup = "local:local-triage"
+deep_analysis = "claude-opus-5-5"
+skeptic_review = "claude-opus-5-5"
+report_draft = "claude-sonnet-5-5"
+overflow = "claude-haiku-5-5"   # used for local-lane stages when the queue is backed up

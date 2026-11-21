@@ -147,9 +147,9 @@ Note: frontier models may refuse some exploit-development prompts. Local-fork Po
 - `jobs` (local queue: state, retries)
 
 ## 7. Tech Stack
-- Python 3.12, uv, Typer CLI, SQLite, Docker sandboxes
+- Python 3.11+, uv (locked, with an `exclude-newer` cooling-off cutoff), Typer CLI, SQLite, Docker sandboxes
 - Foundry, Slither, Aderyn, Semgrep, CodeQL
-- Anthropic SDK, plus an OpenAI-compatible client for Ollama/vLLM
+- Anthropic SDK, plus `httpx2` (the SDK's own HTTP library) for the OpenAI-compatible local endpoint
 - Every dependency goes through the **security-auditor** gate before install
 
 Layout:
@@ -162,6 +162,16 @@ docs/         # architecture, how-tos, learning path (§12)
 
 ## 8. Roadmap
 - **Phase 0 (1–2 wks): research, practice, skeleton**
+  - *Status 2026-11-21:* skeleton done, with 41 tests:
+    - config, schema
+    - ledger with monthly/daily/per-target caps and a kill switch
+    - router with local aliases, Haiku overflow and a pre-call budget check
+    - serial job queue
+    - deny-by-default scope guard
+    - PoC-cheat lint
+    - CLI
+
+    Still to do: the Batch API path, the Docker egress sandbox, Foundry and the Damn Vulnerable DeFi smoke test, and the digest.
   - Verify current AI/automation policies, **age requirements** and KYC/tax rules on Immunefi, Code4rena, Sherlock and Cantina.
   - **Create accounts (human task):** Code4rena and Sherlock first, since they're needed for live contests in Phase 2. Immunefi and Cantina next. Backtesting doesn't need accounts, because past contest repos and findings are public.
   - Confirm the `llm-server` Ollama endpoint is reachable from the dev machine, and benchmark tokens/sec for `qwen3.8:27b`.

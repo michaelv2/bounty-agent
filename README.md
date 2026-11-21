@@ -10,6 +10,18 @@ A personal pipeline that uses agents to find, validate and write up vulnerabilit
 - **A human submits.** The pipeline never submits anything to a bounty platform. The account holder reviews and submits manually.
 - **Scope is code.** If a program's policy doesn't explicitly allow something, the pipeline doesn't do it.
 
+## Quickstart
+```bash
+uv sync                      # install locked dependencies into .venv
+uv run pytest                # run the guardrail tests
+uv run bounty init           # create data/bounty.db
+uv run bounty budget         # frontier spend vs caps (config/router.toml)
+uv run bounty llm-ping       # check llm-server is reachable and its models are present
+uv run bounty lint-poc path/to/Exploit.t.sol   # flag PoCs that cheat with Foundry cheatcodes
+uv run bounty kill           # emergency stop for all Claude API calls (`unkill` to resume)
+```
+Claude calls need `ANTHROPIC_API_KEY` in the environment. Local-only commands don't.
+
 ## Layout (planned)
 ```
 bounty_agent/   pipeline stages (intel, fetch, triage, analysis, validate, dedup, review, report, ledger, router, queue)
