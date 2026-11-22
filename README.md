@@ -294,4 +294,5 @@ The pipeline only needs an OpenAI-compatible API at the URL in `config/router.to
 ## More
 
 - [SPEC.md](SPEC.md): the full design, the roadmap, the cost model, and a changelog of every decision and lesson.
+- [TODO.md](TODO.md): what's planned next, with a "done when" for each item. A good place to pick a first task.
 - [CLAUDE.md](CLAUDE.md): the project's hard rules and conventions (read it before changing structure).
