@@ -2,6 +2,18 @@
 
 Work that is planned but not built. [SPEC.md](SPEC.md) has the design and the reasons behind it.
 
+## Start here
+
+Do **items 1, 2 and 8** first, in that order. Each one catches false positives in code, before any paid model call, and each catches the DVD false positive in a different way:
+
+| Item | What it asks | Works on |
+|---|---|---|
+| 1. Ground truth | Did the exploit achieve the challenge's goal? | practice targets only |
+| 2. Impact check | Did the exploit cause visible damage? | every target |
+| 8. Fix check | Does the exploit depend on the bug? | every target |
+
+Item 1 is the quickest to build and gives every practice run an objective score. Item 2 depends on bug classes (item 6). Start with just the four classes listed in item 2 and grow the list later. Item 8 is the strongest check. Stages D and F2 stay off in the nightly run until all three are done.
+
 ## Code checks instead of model judgment
 
 Right now some decisions rest on Opus's judgment in the skeptic stage (F2). Each item below turns one of them into a visible step in code, with a test. Code can't be argued with, costs nothing to run, and gives the same answer every time. The skeptic stays as a second opinion.
