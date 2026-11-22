@@ -4,6 +4,7 @@
 The goal is side income from public bug bounty programs, using an agent pipeline that mixes local and frontier models to find, validate and write up vulnerabilities that pay out. This is a personal tool for now. It is also meant to be **handed off to a teenage tinkerer**, so it has to be safe by default, modular and well documented, and built around real problems.
 
 **Changelog**
+- v0.6.1: cost model (§5) updated for DeepSeek doing stage D: ~$0.50–1 per mid-size contest instead of ~$8–10 on Opus, with measured costs from the first DVD run. Budget is no longer the binding constraint; human review time and local triage throughput are.
 - v0.6: stage F2 (skeptic review) built. Opus 5.5 at effort `high` tries to refute each stage-D finding (impact, intent, preconditions, PoC realism, scope and severity) and returns `submit` / `reject` / `flag-for-human`. Fail-safe rules sit in code, not in the prompt: an unparseable or declined reply becomes `flag-for-human`; `submit` is downgraded to `flag-for-human` when the PoC has cheat-lint warnings or a program target has no human-confirmed scope. Batch mode by default (the next run collects it and applies results idempotently from `batch_items`); `bounty review <id>` runs one synchronously. Gated by `[review] enabled = false`. Findings now keep the full stage-D hypothesis (`findings.details_json`). The digest lists findings that passed the skeptic, with its concerns. **First live F2 run (2026-11-21):** finding #1 (the DVD false positive) was rejected at confidence 0.95 for the right reasons (only a view call is asserted; the zero-fee grace period is intended; the target's own monitor requires `fee == 0`), at $0.03 synchronous. One D+F2 pass on a hotspot cost about $0.034 in total.
 - **First live stage-D run (2026-11-21, DVD Unstoppable, DeepSeek via Mistral, $0.0042):** produced a **false positive**. The model wrote a PoC asserting `flashFee == 0` during the grace period — true, but *intended* behavior, not the challenge's bug (a donation that breaks the share/asset invariant). The PoC passed the sandbox because it asserts a real fact; it shows no attacker gain or broken invariant. Lessons: (1) "a Foundry test passes" is NOT "a vulnerability with impact" — the judge only checks the named test ran and succeeded; (2) the cheat lint correctly stayed silent (no cheatcodes — a weak claim, not cheating); (3) this is concrete justification for the F2 skeptic (Opus) and the human gate, and for the backtest's ground-truth comparison. **Build F2 before trusting any finding.** Possible stage-D hardening: push the prompt/judge toward asserting a before/after impact delta, and for practice/backtest targets check the challenge's own success condition (DVD `_isSolved`) rather than the model's self-asserted impact.
 - **Stage-D prompt follow-up (2026-11-21):** the hypothesis now carries an explicit `exploitable: yes|no`. A "no" records a dropped hypothesis with the model's reason and runs nothing. Before this, the prompt asked for a "test asserting the safe behavior" on a no, and that passing test would have been recorded as a finding (a latent false-positive path, caught by a regression test). Also restored prompt guidance lost when it was compressed to avoid safety-classifier interruptions: the attacker is an unprivileged actor in the threat model, impact must be concrete, relative imports start from `test/`, flash-loan amounts must be justified, and intended behavior is not a bug.
@@ -152,36 +153,41 @@ host (WSL)                                   no Docker socket inside any contain
 ### 4.2 Orchestration (who runs the daily process)
 - **The controller is deterministic Python code, not an LLM.** `bounty run` is a resumable state machine over the SQLite tables, started headless by a systemd timer or cron on the WSL host. Each run picks targets by EV, enqueues local jobs, drains the local queue (overnight), submits and collects batches, runs PoCs in the sandbox, and writes the digest.
 - **Why not an LLM supervisor:** budget caps, scope checks and sandbox arguments must not be open to negotiation. Prompt injection in target code must not be able to reroute the pipeline. A deterministic controller is also testable, reproducible, and spends no tokens on "managing".
-- **LLMs are workers inside stages,** chosen per stage by the router: local Qwen for bulk work, Opus for deep analysis (D) and the skeptic filter (F2) in front of the human.
+- **LLMs are workers inside stages,** chosen per stage by the router: local Qwen for bulk work, a cheap hosted model (DeepSeek V4.1 Flash) for deep analysis (D), and Opus for the skeptic filter (F2) in front of the human.
 - **Claude Code is the dev and review environment,** not part of the automated loop. The weekly human review can be a Claude Code session ("walk me through this week's digest"). The pipeline calls the Anthropic API directly so every token goes through the ledger.
 - **Built 2026-11-21 (`bounty_agent/pipeline/`):** `bounty run` with a run lock and a `runs` history. Each run requeues stale jobs, collects finished batches, syncs `config/targets.toml`, advances targets through `new → fetched → compiler_ready → triage_queued → triaged → ranked → awaiting_analysis`, and drains the local queue within a time budget. A failing step records the error. After 3 failures the target is `blocked` until `bounty target-reset`. `program` targets are refused until a confirmed policy exists. `bounty digest` writes the weekly markdown and a one-line summary. `scripts/bounty-nightly.sh` wraps both and is **installed in cron at 01:30** (log: `data/nightly.log`). It posts the one-line summary to Slack via `SLACK_WEBHOOK_URL`, loaded from `~/.bashrc_env` at runtime like the machine's other cron jobs. A failed post never fails the run. First real run: DVD Unstoppable went `new → awaiting_analysis` in 3.4 min. The real bug ranked #4 of 5 in local triage; deep analysis has to recover it from the top-K.
 - **Ops reviewer: Mistral Large 4 (decided 2026-11-21).** Once a week it reads the ledger, backtest metrics, queue and batch state, and recent outcomes. It writes a short progress note with *proposed* config changes (routes, caps, EV weights), which a human approves. It is advisory only: no write access to config, no control-path role. It goes through the router and ledger like every other model (provider + price-table entry + caps). Its input is pipeline metrics, never raw target code. Not yet built. It needs Mistral's current API and pricing checked first.
 
 ## 5. Model Routing & Cost Model
-Prices are from Anthropic's pricing docs as of 2026-11-21, per MTok:
+Prices as of 2026-11-21, per MTok (`bounty_agent/ledger/pricing.py` is the source of truth):
 - **Opus 5.5:** $4 input / $20 output; batch $2 / $10; cache hit $0.20
 - **Sonnet 5.5:** $2 / $10; batch $1 / $5
 - **Haiku 5.5:** $0.10 / $0.50
+- **DeepSeek V4.1 Flash** (via Mistral's API): $0.30 / $1.20; cache hit $0.007
 
 The 4.7+ tokenizer produces about 30% more tokens than older models, so the estimates assume that.
 
 | Stage | Default | Fallback / experiment |
 |---|---|---|
 | A policy parsing, C summaries/hotspots, F similarity | Local Qwen (free, serial) | Haiku 5.5 overflow |
-| D hypotheses + PoC writing | Opus 5.5, cached prefix | Sonnet 5.5 (A/B in backtest) |
-| F2 skeptic review | Opus 5.5 via Batch API | n/a |
+| D hypotheses + PoC writing | DeepSeek V4.1 Flash via Mistral, cached prefix | Opus 5.5 escalation for high-confidence misses (`[analysis] escalate`, not built); GLM / Sonnet A/B in the backtest |
+| F2 skeptic review | Opus 5.5, effort `high`, via Batch API | n/a (the stage D model must never be the skeptic) |
 | G report draft | Sonnet 5.5 via Batch API | Local |
 
-**Estimated cost per mid-size contest** (~200k-token codebase):
-| Item | Cost |
-|---|---|
-| Cache write | ~$1–2 |
-| ~20 hypothesis turns on cache | ~$1 input + ~$2 output |
-| PoC iteration | ~$3–4 |
-| Skeptic and report | <$1 |
-| **Total** | **~$8–10 per contest on Opus**, roughly half on Sonnet |
+**Measured (2026-11-21, one DVD hotspot, one ~2k-token file):** stage D $0.0042 (two DeepSeek turns), skeptic $0.030 (4,752 input and 537 output tokens, synchronous; about $0.015 as a batch). About $0.034 for the hotspot end to end.
 
-So **$75/month covers ~7–9 deep runs**. The EV ranking has to be selective. These numbers are estimates, and the Phase 1 ledger replaces them with real ones.
+**Estimated cost per mid-size contest** (~200k-token codebase):
+| Item | DeepSeek for D (current) | Opus for D (escalation path) |
+|---|---|---|
+| Cache write | ~$0.06 | ~$1–2 |
+| ~20 hypothesis turns on cache | ~$0.15 | ~$1 input + ~$2 output |
+| PoC iteration | ~$0.30 | ~$3–4 |
+| Skeptic (~5 findings, batched) and report | ~$0.20–0.50 | <$1 |
+| **Total** | **~$0.50–1 per contest** | **~$8–10 per contest** |
+
+With DeepSeek doing stage D, **$75/month is no longer the binding constraint**: it covers dozens of contests. The real limits are now the human's review time (≤3 packets/week), the local triage throughput on `llm-server` (serial, overnight), and sandbox time. Opus for stage D stays available as an escalation for the few hotspots where the cheap model fails but triage was confident. The EV ranking still matters, because review time is the scarce resource. These numbers are estimates, and the Phase 1 ledger replaces them with real ones.
+
+**Worst-case reservations are much larger than real costs.** The router reserves each call's full `max_tokens` of output before sending it (the skeptic's 16k-token cap reserves ~$0.34 for a ~$0.03 call). That's correct for safety, but large batches hold a lot of the daily cap until they're collected. See TODO.md if this starts blocking work.
 
 Note: frontier models may refuse some exploit-development prompts. Local-fork PoCs for authorized contests are usually fine. If refusals become a problem, look into Anthropic's Cyber Verification Program (access for verified security research).
 
@@ -253,7 +259,7 @@ docs/         # architecture, how-tos, learning path (§12)
 |---|---|
 | Reputation damage | PoC-only, PoC-cheat lint, Opus skeptic, human final gate |
 | Legal / out-of-scope activity | No live contact through Phase 3, scope-as-code, deny by default |
-| Budget overrun | Hard monthly cap, local-first, batch + cache, EV-selective deep runs |
+| Budget overrun | Hard monthly cap, worst-case reservation before every call, local-first, cheap model for stage D, batch + cache |
 | Prompt injection from target code | No egress, no secrets in sandbox, read-only tools. Target content is untrusted. |
 | Policy changes | Re-parse on each run. A changed policy forces human re-confirmation. |
 | Minor operating accounts | Submissions and payouts stay under the adult account holder unless a platform's terms explicitly allow minors |

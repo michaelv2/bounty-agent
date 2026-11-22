@@ -67,6 +67,16 @@ Ideas from a Le Chat conversation about how security flaws are found, translated
 
 - [x] Review the Le Chat conversation for more ideas (done; see items 6–11).
 
+### More ideas
+
+- [ ] **12. A hypothesis council (experiment, after items 1, 2 and 8).** Today one model (DeepSeek) proposes one hypothesis per hotspot. Borrow the pattern from `~/projects/llm-council`: several model families (DeepSeek, GLM 5.3 Flash, local Qwen) each propose hypotheses from a different assigned *angle* (one bug class each, see item 6), peer-rank them anonymously, and only the top few become PoCs. The sandbox and items 1, 2 and 8 stay the judges; the council only widens the search.
+  - Port the pattern, not the code: llm-council uses plain `httpx` and its own config, while every paid call here must go through `Router.complete` so the budget caps apply (CLAUDE.md).
+  - Keep llm-council's hard rule: the model that wrote a PoC never sits on the panel that judges it.
+  - Done when: the backtest compares single-model and council runs on the same contests (recall per class, false positives, $ and wall time), and the result decides whether it stays.
+
+- [ ] **13. Right-size cost reservations.** The router reserves each call's full `max_tokens` (the skeptic reserves ~$0.34 for a ~$0.03 call). Lower `[review] max_tokens` to about 6,000, and have `--dry-run` print a typical cost (the stage's average from the `costs` table) next to the worst case.
+  - Done when: `bounty review ID --dry-run` prints both numbers, and a 30-finding batch reserves under $5.
+
 ## Other open items
 
 - [ ] Backtest harness (Phase 1): run past Code4rena/Sherlock contests and score recall, false positives and $ per contest. Compare models on the same harness too (DeepSeek, GLM, Opus): the workflow may matter more than the model.
